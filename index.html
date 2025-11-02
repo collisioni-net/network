@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Collisioni Electronic Music Network</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header>
+        <div class="header-content">
+            <img src="co_logo.png" alt="Collisioni Logo" class="logo">
+            <div class="header-text">
+                <h1>
+                    <span class="title-full">Collisioni Electronic Music Network</span>
+                    <span class="title-short">collisioni</span>
+                </h1>
+                <p>an interactive map of artists in south tyrol</p>
+            </div>
+        </div>
+    </header>
+    
+    <main>
+        <div id="loading">loading artist data...</div>
+        <div id="graph-container">
+            <canvas id="network-canvas"></canvas>
+        </div>
+        
+        <div id="controls">
+            <button id="reset-view">reset view</button>
+            <div id="legend">
+                <div><span class="artist-dot"></span> artists</div>
+                <div><span class="location-dot"></span> locations</div>
+                <div><span class="genre-dot"></span> genres</div>
+                <div><span class="collective-dot"></span> collectives</div>
+            </div>
+        </div>
+    </main>
+    
+    <div id="bottom-info">
+        <span class="explainer-text">click nodes to explore • drag to move • scroll to zoom</span>
+        <button id="about-us-btn">about COLLISIONI</button>
+    </div>
+
+    <!-- Modal for artist info -->
+    <div id="modal-overlay" class="hidden">
+        <div id="modal">
+            <div id="modal-header">
+                <h2 id="modal-title"></h2>
+                <button id="close-modal">×</button>
+            </div>
+            <div id="modal-content">
+                <div id="artist-info">
+                    <div class="info-row">
+                        <span class="label">name:</span>
+                        <span id="artist-name"></span>
+                    </div>
+                    <div class="info-row">
+                        <span class="label">genre:</span>
+                        <span id="artist-genre"></span>
+                    </div>
+                    <div class="info-row">
+                        <span class="label">location:</span>
+                        <span id="artist-location"></span>
+                    </div>
+                    <div class="info-row">
+                        <span class="label">location 2:</span>
+                        <span id="artist-location2"></span>
+                    </div>
+                    <div class="info-row">
+                        <span class="label">url:</span>
+                        <a id="artist-url" href="#" target="_blank"></a>
+                    </div>
+                    <div class="info-row">
+                        <span class="label">info:</span>
+                        <p id="artist-info-text"></p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script src="script.js"></script>
+</body>
+</html>

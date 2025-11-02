@@ -1,0 +1,705 @@
+/* Early Internet / Lofi Aesthetic */
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: 'Courier New', monospace;
+    background-color: #000;
+    color: #00ff00;
+    line-height: 1.4;
+    overflow-x: hidden;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+}
+
+/* Terminal-style header */
+header {
+    padding: 20px;
+    border-bottom: 1px solid #00ff00;
+    text-align: left;
+    background: #000;
+}
+
+.header-content {
+    display: flex;
+    align-items: center;
+    position: relative;
+    width: 100%;
+}
+
+.logo {
+    height: 60px;
+    width: auto;
+    flex-shrink: 0;
+    position: absolute;
+    left: 0;
+    z-index: 1;
+}
+
+.header-text {
+    flex: 1;
+    text-align: center;
+    padding: 0 75px; /* padding instead of margin to keep content within bounds */
+    box-sizing: border-box;
+}
+
+header h1 {
+    font-size: 1.8rem;
+    font-weight: bold;
+    margin-bottom: 5px;
+    text-transform: lowercase;
+    letter-spacing: 2px;
+}
+
+.title-short {
+    display: none;
+}
+
+header p {
+    font-size: 0.9rem;
+    opacity: 0.8;
+    text-transform: lowercase;
+}
+
+/* Main content area */
+main {
+    position: relative;
+    flex: 1;
+    width: 100%;
+}
+
+#loading {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    font-size: 1.1rem;
+    z-index: 10;
+}
+
+#graph-container {
+    width: 100%;
+    height: 100%;
+    position: relative;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+}
+
+#network-canvas {
+    width: 100%;
+    height: 100%;
+    cursor: grab;
+    display: block;
+    flex: 1;
+}
+
+/* Controls */
+#controls {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    z-index: 100;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+#reset-view {
+    background: transparent;
+    border: 1px solid #00ff00;
+    color: #00ff00;
+    padding: 8px 12px;
+    font-family: 'Courier New', monospace;
+    font-size: 0.8rem;
+    cursor: pointer;
+    text-transform: lowercase;
+    transition: all 0.2s;
+}
+
+#reset-view:hover {
+    background: #00ff00;
+    color: #000;
+}
+
+#legend {
+    background: rgba(0, 0, 0, 0.8);
+    border: 1px solid #00ff00;
+    padding: 10px;
+    font-size: 0.7rem;
+    min-width: 120px;
+}
+
+#legend div {
+    display: flex;
+    align-items: center;
+    margin-bottom: 5px;
+    gap: 8px;
+}
+
+    /* On mobile keep legend items inline and remove extra spacing */
+    @media (max-width: 480px) {
+        #legend div { margin-bottom: 0; }
+        #legend { gap: 10px; }
+    }
+
+.artist-dot, .location-dot, .genre-dot, .collective-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+}
+
+.artist-dot {
+    background-color: #00ff00;
+}
+
+.location-dot {
+    background-color: #ff0080;
+}
+
+.genre-dot {
+    background-color: #0080ff;
+}
+
+.collective-dot {
+    background-color: #ffff00;
+}
+
+/* Modal styling */
+#modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    background: rgba(0, 0, 0, 0.9);
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    animation: fadeIn 0.3s ease;
+}
+
+#modal-overlay.hidden {
+    display: none;
+}
+
+#modal {
+    background: #000;
+    border: 2px solid #00ff00;
+    max-width: 500px;
+    width: 90%;
+    max-height: 80vh;
+    overflow-y: auto;
+    position: relative;
+    animation: slideIn 0.3s ease;
+}
+
+#modal-header {
+    padding: 15px 20px;
+    border-bottom: 1px solid #00ff00;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+#modal-title {
+    font-size: 1.2rem;
+    font-weight: normal;
+    text-transform: lowercase;
+}
+
+#close-modal {
+    background: transparent;
+    border: none;
+    color: #00ff00;
+    font-size: 1.5rem;
+    cursor: pointer;
+    padding: 0;
+    width: 30px;
+    height: 30px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+#close-modal:hover {
+    background: #00ff00;
+    color: #000;
+}
+
+#modal-content {
+    padding: 20px;
+}
+
+.info-row {
+    margin-bottom: 15px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+.label {
+    font-weight: bold;
+    opacity: 0.8;
+    font-size: 0.9rem;
+}
+
+#artist-name, #artist-genre, #artist-location, #artist-location2 {
+    font-size: 1rem;
+}
+
+#artist-url {
+    color: #0080ff;
+    text-decoration: underline;
+    word-break: break-all;
+}
+
+#artist-url:hover {
+    color: #00ff00;
+}
+
+#artist-info-text {
+    margin-top: 5px;
+    line-height: 1.5;
+    font-size: 0.95rem;
+    opacity: 0.9;
+}
+
+.about-content {
+    line-height: 1.6;
+    font-size: 0.95rem;
+}
+
+.about-content p {
+    margin-bottom: 15px;
+}
+
+.about-content ul {
+    line-height: 1.8;
+}
+
+.about-content a {
+    color: #0080ff;
+    text-decoration: underline;
+}
+
+.about-content a:hover {
+    color: #00ff00;
+}
+
+/* About modal styling - wider than default */
+#modal.about-modal {
+    max-width: 700px;
+    width: 90%;
+}
+
+#modal.about-modal .about-content {
+    max-width: none;
+}
+
+/* Bottom info bar */
+#bottom-info {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 40px;
+    background: rgba(0, 0, 0, 0.95);
+    border-top: 1px solid #00ff00;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 20px;
+    font-size: 0.8rem;
+    z-index: 1000;
+}
+
+.explainer-text {
+    color: #00ff00;
+    opacity: 0.8;
+    font-family: 'Courier New', monospace;
+}
+
+#about-us-btn {
+    background: transparent;
+    border: 1px solid #00ff00;
+    color: #00ff00;
+    padding: 6px 12px;
+    font-family: 'Courier New', monospace;
+    font-size: 0.8rem;
+    cursor: pointer;
+    text-transform: lowercase;
+    transition: all 0.2s;
+    white-space: nowrap;
+}
+
+#about-us-btn:hover {
+    background: #00ff00;
+    color: #000;
+}
+
+/* Animations */
+@keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+@keyframes slideIn {
+    from { 
+        opacity: 0;
+        transform: scale(0.9) translateY(-20px);
+    }
+    to { 
+        opacity: 1;
+        transform: scale(1) translateY(0);
+    }
+}
+
+/* Mobile responsiveness */
+@media (max-width: 768px) {
+    header {
+        text-align: center;
+    }
+    
+    .header-content {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 10px;
+        position: static;
+    }
+    
+    .logo {
+        height: 45px;
+        position: static;
+        order: -1;
+    }
+    
+    .header-text {
+        padding: 0;
+        text-align: center;
+        line-height: 1.2;
+    }
+    
+    header h1 {
+        font-size: 1.4rem;
+        margin-bottom: 3px;
+    }
+    
+    .title-full {
+        display: none;
+    }
+    
+    .title-short {
+        display: inline;
+    }
+    
+    header p {
+        font-size: 0.8rem;
+        line-height: 1.1;
+    }
+    
+    /* Hide reset button on mobile */
+    #reset-view {
+        display: none;
+    }
+    
+    /* Hide usage description on mobile */
+    .explainer-text {
+        display: none;
+    }
+    
+    /* Make main take full available height on mobile */
+    main {
+        flex: 1;
+        height: auto;
+        padding-bottom: 0;
+        min-height: 0; /* allow flex shrinking */
+    }
+    
+    #graph-container {
+        height: 100%;
+        min-height: 0; /* allow flex shrinking */
+        flex: 1;
+    }
+    
+    #network-canvas {
+        height: 100%;
+        width: 100%;
+        display: block;
+    }
+    
+    #controls {
+        position: relative;
+        flex-direction: row;
+        padding: 10px;
+        background: rgba(0, 0, 0, 0.8);
+        border-bottom: 1px solid #00ff00;
+    }
+    
+    #legend {
+        flex: 1;
+        min-width: auto;
+    }
+    
+    #legend div {
+        margin-bottom: 3px;
+    }
+    
+    main {
+        height: calc(100vh - 180px);
+    }
+    
+    #modal {
+        width: 98%;
+        max-height: 92vh;
+        border-radius: 4px;
+    }
+    
+    #modal-content {
+        padding: 15px;
+    }
+    
+    .info-row {
+        margin-bottom: 12px;
+    }
+    
+    #network-canvas {
+        cursor: default;
+    }
+}
+
+/* When modal is open, hide other UI chrome so only modal is visible */
+body.modal-open {
+    overflow: hidden; /* prevent background scrolling */
+}
+
+body.modal-open header,
+body.modal-open #controls,
+body.modal-open #bottom-info,
+body.modal-open #explanation {
+    display: none !important;
+}
+
+/* Make overlay highest z-index to cover everything */
+#modal-overlay {
+    z-index: 2000;
+}
+
+@media (max-width: 480px) {
+    header {
+        padding: 15px;
+        text-align: center;
+    }
+    
+    .header-content {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 8px;
+        position: static;
+    }
+    
+    .logo {
+        height: 35px;
+        position: static;
+        order: -1;
+    }
+    
+    .header-text {
+        padding: 0;
+        text-align: center;
+        line-height: 1.1;
+    }
+    
+    header h1 {
+        font-size: 1.2rem;
+        letter-spacing: 1px;
+        margin-bottom: 2px;
+        line-height: 1.2;
+    }
+    
+    .title-full {
+        display: none;
+    }
+    
+    .title-short {
+        display: inline;
+    }
+    
+    header p {
+        line-height: 1.0;
+    }
+    
+    /* Hide reset button and usage text on mobile */
+    #reset-view {
+        display: none;
+    }
+    
+    .explainer-text {
+        display: none;
+    }
+    
+    /* Ensure full height usage on small mobile */
+    main {
+        flex: 1;
+        height: auto;
+        padding-bottom: 0;
+        min-height: 0; /* allow flex shrinking */
+    }
+    
+    #graph-container {
+        height: 100%;
+        min-height: 0; /* allow flex shrinking */
+        flex: 1;
+    }
+    
+    #network-canvas {
+        height: 100%;
+        width: 100%;
+        display: block;
+    }
+    
+    #bottom-info {
+        padding: 0 15px;
+        height: 35px;
+        justify-content: center; /* center the about button when text is hidden */
+    }
+    
+    .explainer-text {
+        font-size: 0.7rem;
+    }
+    
+    #about-us-btn {
+        padding: 4px 8px;
+        font-size: 0.7rem;
+    }
+    
+    #controls {
+        flex-direction: column;
+        gap: 5px;
+    }
+    
+    #reset-view {
+        padding: 6px 10px;
+        font-size: 0.75rem;
+    }
+    
+    #legend {
+        font-size: 0.65rem;
+    }
+
+    /* Modern mobile modal layout */
+    #modal {
+        width: 100%;
+        height: 100%;
+        max-height: 100%;
+        border-radius: 0;
+        margin: 0;
+        display: flex;
+        flex-direction: column;
+    }
+
+    #modal-header {
+        padding: 18px 20px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+    }
+
+    #modal-content {
+        padding: 18px;
+        overflow-y: auto;
+    }
+
+    .group-list button.group-artist-btn {
+        padding: 12px 14px !important;
+        font-size: 1rem !important;
+        border-radius: 4px;
+    }
+
+    /* Sticky controls at bottom for mobile - contained small box, no rounded edges or extra borders */
+    #controls {
+        position: fixed;
+        bottom: 45px; /* above bottom info bar */
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 1100;
+        display: flex;
+        flex-direction: row; /* force single row */
+        flex-wrap: nowrap;   /* prevent wrapping to multiple lines */
+        align-items: center;
+        justify-content: space-between; /* keep reset and legend spaced */
+        gap: 10px;
+        padding: 6px 10px;
+        background: rgba(0,0,0,0.95);
+        width: min(420px, 92%);
+        height: 44px; /* slightly smaller fixed height */
+        max-height: 44px;
+        border: none; /* no outer border */
+        border-radius: 0; /* no rounded edges */
+        box-shadow: none;
+        overflow: hidden; /* ensure long legend doesn't wrap */
+    }
+
+    #legend {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        padding: 0 6px;
+        min-width: 0;
+        color: #00ff00;
+        font-size: 0.85rem;
+        white-space: nowrap; /* prevent wrapping */
+        overflow: hidden;
+        text-overflow: ellipsis; /* truncate if too long */
+    }
+
+    /* reset button to match legend height and sit inline */
+    #reset-view {
+        padding: 6px 10px;
+        font-size: 0.85rem;
+        height: 30px;
+        line-height: 14px;
+        align-self: center;
+        border: 1px solid #00ff00; /* single thin outline */
+        background: transparent;
+        white-space: nowrap;
+        flex: 0 0 auto; /* don't shrink or grow */
+    }
+
+    /* Ensure modal/content doesn't sit beneath controls or bottom bar */
+    #bottom-info {
+        z-index: 1001; /* above controls */
+    }
+}
+
+/* Also apply bottom controls for larger mobile/tablet widths */
+@media (max-width: 768px) {
+    #controls {
+        position: fixed !important;
+        bottom: 45px !important; /* above bottom info bar */
+        top: auto !important;
+        left: 50% !important;
+        transform: translateX(-50%) !important;
+        z-index: 1100;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        gap: 12px;
+        padding: 8px 12px;
+        background: rgba(0,0,0,0.95);
+        width: min(420px, 92%);
+        height: 48px;
+        max-height: 48px;
+        border: none;
+        border-radius: 0;
+        box-shadow: none;
+    }
+}
