@@ -1021,7 +1021,7 @@ class MusicNetwork {
                     <p style="margin-bottom: 0;">
                         <span style="color: #00ff00; font-weight: bold;">Contact:</span> 
                         <a href="https://www.instagram.com/sonn__ambula/" target="_blank" style="color: #4a90a4; text-decoration: underline;">Dorothea T.</a> 
-                        (<a href="mailto:dorothea.tommasi@gmail.com" style="color: #4a90a4; text-decoration: underline;">Email</a>) & 
+                        (<a href="mailto:info.collisioni@gmail.com" style="color: #4a90a4; text-decoration: underline;">Email</a>) & 
                         <a href="https://www.instagram.com/davidfrisch2/" target="_blank" style="color: #4a90a4; text-decoration: underline;">David L.</a>
                     </p>
                 </div>
