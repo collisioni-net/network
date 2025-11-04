@@ -99,7 +99,11 @@ class MusicNetwork {
                     .force('charge', d3.forceManyBody().strength(-24))
                 // center force uses current canvas center
                 .force('center', d3.forceCenter(this.canvas.width / 2, this.canvas.height / 2))
-                .force('collision', d3.forceCollide().radius(d => this.nodeTypes[d.type].radius + 8).iterations(2))
+                // gentle pull toward center for isolated nodes so they don't wander off
+                .force('forceX', d3.forceX(this.canvas.width / 2).strength(0.02))
+                .force('forceY', d3.forceY(this.canvas.height / 2).strength(0.02))
+                // slightly increase collision radius for better separation while keeping them in view
+                .force('collision', d3.forceCollide().radius(d => this.nodeTypes[d.type].radius + 10).iterations(2))
                 .alphaTarget(0)
                 .on('tick', () => {
                     // copy positions back to our canonical nodes array (match by id)
@@ -124,6 +128,15 @@ class MusicNetwork {
                         this.autoCenterTicks -= 1;
                         if (this.autoCenterTicks <= 0) this.autoCentering = false;
                         else this.autoCentering = true;
+                    }
+
+                    // Clamp nodes to remain inside visible canvas area with padding
+                    const rect = this.canvas.getBoundingClientRect();
+                    const paddingClamp = 40; // keep nodes this far from edges
+                    for (let i = 0; i < nodes.length; i++) {
+                        const nd = nodes[i];
+                        nd.x = Math.max(paddingClamp, Math.min(rect.width - paddingClamp, nd.x));
+                        nd.y = Math.max(paddingClamp, Math.min(rect.height - paddingClamp, nd.y));
                     }
                     this.render();
                 });
