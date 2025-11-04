@@ -25,6 +25,21 @@ class MusicNetwork {
             genre: { color: '#0080ff', radius: 6 },
             collective: { color: '#ffff00', radius: 7 }
         };
+
+        // Keep original canvas styling by default (set to false to use enhanced visuals)
+        this.legacyStyle = true;
+
+        // Visibility toggles for legend filtering
+        this.visibleTypes = {
+            artist: true,
+            location: true,
+            genre: true,
+            collective: true
+        };
+
+    // auto-centering while simulation runs (disabled when user interacts)
+    this.autoCentering = false; // enabled briefly after load or reset via ticks
+    this.autoCenterTicks = 0;   // number of ticks to auto-center for
         
         this.init();
     }
@@ -38,14 +53,109 @@ class MusicNetwork {
         this.createNodes();
         console.log('Creating connections...');
         this.createConnections();
-        console.log('Running initial layout to avoid overlaps...');
-        this.runLayout();
+        console.log('Setting up force simulation...');
+        this.setupSimulation();
         console.log('Centering view...');
         this.centerView();
         console.log('Rendering...');
         this.render();
         document.getElementById('loading').style.display = 'none';
         console.log('Initialization complete!');
+    }
+
+    /***********************
+     * d3-force integration
+     ***********************/
+    setupSimulation() {
+        // lazy-load d3 if not present by injecting CDN script
+        if (typeof d3 === 'undefined') {
+            const s = document.createElement('script');
+            s.src = 'https://unpkg.com/d3@7/dist/d3.min.js';
+            s.onload = () => this._initSimulationOnceD3Loaded();
+            document.head.appendChild(s);
+        } else {
+            this._initSimulationOnceD3Loaded();
+        }
+    }
+
+    _initSimulationOnceD3Loaded() {
+        try {
+            // Build link objects expected by d3
+            const links = this.connections.map(c => ({ source: c.from, target: c.to, type: c.type }));
+
+            // Map nodes by id for d3
+            const nodes = this.nodes.map(n => Object.assign({}, n));
+
+            // Create simulation with many-body, link and collision
+            this.simulation = d3.forceSimulation(nodes)
+                .force('link', d3.forceLink(links).id(d => d.id).distance(d => {
+                    // different link distances by type
+                    if (d.type === 'location') return 90;
+                    if (d.type === 'genre') return 110;
+                    if (d.type === 'collective') return 80;
+                    return 100;
+                }).strength(0.32))
+                // slightly reduced charge so nodes stay closer together
+                .force('charge', d3.forceManyBody().strength(-20))
+                // center force uses current canvas center
+                .force('center', d3.forceCenter(this.canvas.width / 2, this.canvas.height / 2))
+                .force('collision', d3.forceCollide().radius(d => this.nodeTypes[d.type].radius + 8).iterations(2))
+                .alphaTarget(0)
+                .on('tick', () => {
+                    // copy positions back to our canonical nodes array (match by id)
+                    for (let i = 0; i < nodes.length; i++) {
+                        const nd = nodes[i];
+                        const local = this.nodes.find(x => x.id === nd.id);
+                        if (local) {
+                            local.x = nd.x;
+                            local.y = nd.y;
+                            local.vx = nd.vx;
+                            local.vy = nd.vy;
+                        }
+                    }
+                    // Auto-center only for a short countdown after load/reset
+                    if (this.autoCenterTicks > 0) {
+                        const bounds = this.getBounds();
+                        const containerRect = this.canvas.getBoundingClientRect();
+                        const centerX = (bounds.minX + bounds.maxX) / 2;
+                        const centerY = (bounds.minY + bounds.maxY) / 2;
+                        this.offsetX = containerRect.width / 2 - centerX;
+                        this.offsetY = containerRect.height / 2 - centerY;
+                        this.autoCenterTicks -= 1;
+                        if (this.autoCenterTicks <= 0) this.autoCentering = false;
+                        else this.autoCentering = true;
+                    }
+                    this.render();
+                });
+
+            // when simulation finishes settling, only center if this was the
+            // initial auto-centering run to avoid jumping after user interaction
+            const initialAutoCenter = this.autoCenterTicks > 0;
+            this.simulation.on('end', () => {
+                try {
+                    if (initialAutoCenter) {
+                        this.centerView();
+                        this.render();
+                    }
+                } catch (e) {
+                    // ignore
+                }
+            });
+
+            // Attach drag handlers that interact with the simulation
+            this._d3nodes = nodes;
+            this._d3links = links;
+
+            // reduce initial alpha to settle quicker
+            this.simulation.alpha(0.6).restart();
+            // enable auto-centering briefly after loading
+            this.autoCenterTicks = 80; // number of ticks to auto-center for (tuneable)
+            this.autoCentering = true;
+        } catch (err) {
+            console.error('Error initializing d3 simulation:', err);
+            // fallback to previous runLayout behavior
+            this.runLayout();
+        }
     }
 
     // Simple iterative layout to separate nodes and avoid overlaps
@@ -161,6 +271,11 @@ class MusicNetwork {
                 if (window.innerWidth <= 768) {
                     this.runLayout(100); // shorter layout run for responsiveness
                 }
+                // update simulation center if present so nodes stay centered
+                if (this.simulation && typeof d3 !== 'undefined') {
+                    this.simulation.force('center', d3.forceCenter(this.canvas.width / 2, this.canvas.height / 2));
+                    this.simulation.alpha(0.2).restart();
+                }
                 this.render();
             }, 100);
         });
@@ -180,7 +295,14 @@ class MusicNetwork {
         
         // Reset view button
         document.getElementById('reset-view').addEventListener('click', () => {
+            // enable auto-centering briefly after reset
+            this.autoCenterTicks = 80;
+            this.autoCentering = true;
             this.centerView();
+            if (this.simulation && typeof d3 !== 'undefined') {
+                this.simulation.force('center', d3.forceCenter(this.canvas.width / 2, this.canvas.height / 2));
+                this.simulation.alpha(0.3).restart();
+            }
             this.render();
         });
         
@@ -199,6 +321,33 @@ class MusicNetwork {
         document.getElementById('about-us-btn').addEventListener('click', () => {
             this.showAboutModal();
         });
+
+        // Legend toggle handlers: click on legend items to show/hide types
+        const legend = document.getElementById('legend');
+        if (legend) {
+            // legend has 4 child divs in the DOM order: artists, locations, genres, collectives
+            const items = legend.querySelectorAll('div');
+            if (items && items.length >= 4) {
+                const mapping = ['artist', 'location', 'genre', 'collective'];
+                items.forEach((it, idx) => {
+                    it.style.cursor = 'pointer';
+                    it.addEventListener('click', () => {
+                        const type = mapping[idx];
+                        this.visibleTypes[type] = !this.visibleTypes[type];
+                        // visual feedback: toggle opacity
+                        it.style.opacity = this.visibleTypes[type] ? '1' : '0.35';
+                        // If hiding some node types, we may want to hide their nodes & links
+                        this.render();
+                        // nudge simulation to reposition remaining nodes
+                        if (this.simulation) {
+                            // recompute center and restart lightly
+                            this.simulation.force('center', d3.forceCenter(this.canvas.width / 2, this.canvas.height / 2));
+                            this.simulation.alpha(0.3).restart();
+                        }
+                    });
+                });
+            }
+        }
     }
     
     async loadData() {
@@ -626,43 +775,111 @@ class MusicNetwork {
         this.ctx.save();
         this.ctx.translate(this.offsetX, this.offsetY);
         this.ctx.scale(this.scale, this.scale);
-        
-        // Draw connections first (behind nodes)
-        this.ctx.strokeStyle = '#00ff0040';
-        this.ctx.lineWidth = 1;
-        this.connections.forEach(conn => {
-            const fromNode = this.nodes.find(n => n.id === conn.from);
-            const toNode = this.nodes.find(n => n.id === conn.to);
-            
-            if (fromNode && toNode) {
+        // Branch: legacy style (original look) vs enhanced visuals
+        if (this.legacyStyle) {
+            // Original drawing style (keeps your original look)
+            this.ctx.strokeStyle = '#00ff0040';
+            this.ctx.lineWidth = 1;
+            this.connections.forEach(conn => {
+                const fromNode = this.nodes.find(n => n.id === conn.from);
+                const toNode = this.nodes.find(n => n.id === conn.to);
+                if (fromNode && toNode) {
+                    // skip drawing if either node's type is hidden
+                    if (!this.visibleTypes[fromNode.type] || !this.visibleTypes[toNode.type]) return;
+                    this.ctx.beginPath();
+                    this.ctx.moveTo(fromNode.x, fromNode.y);
+                    this.ctx.lineTo(toNode.x, toNode.y);
+                    this.ctx.stroke();
+                }
+            });
+
+            this.nodes.forEach(node => {
+                if (!this.visibleTypes[node.type]) return; // skip hidden types
+                const nodeType = this.nodeTypes[node.type];
+
+                // Draw node circle
+                this.ctx.fillStyle = nodeType.color;
+                this.ctx.beginPath();
+                this.ctx.arc(node.x, node.y, nodeType.radius, 0, Math.PI * 2);
+                this.ctx.fill();
+
+                // Draw node border for better visibility
+                this.ctx.strokeStyle = nodeType.color;
+                this.ctx.lineWidth = 1;
+                this.ctx.stroke();
+
+                // Draw label (original styling)
+                this.ctx.fillStyle = '#00ff00';
+                this.ctx.font = '10px Courier New, monospace';
+                this.ctx.textAlign = 'center';
+                this.ctx.fillText(node.label, node.x, node.y + nodeType.radius + 15);
+            });
+        } else {
+            // Enhanced visuals (alternate mode)
+            this.connections.forEach(conn => {
+                const fromNode = this.nodes.find(n => n.id === conn.from);
+                const toNode = this.nodes.find(n => n.id === conn.to);
+                if (!fromNode || !toNode) return;
+                if (!this.visibleTypes[fromNode.type] || !this.visibleTypes[toNode.type]) return;
+
+                // style by type
+                if (conn.type === 'location') this.ctx.strokeStyle = 'rgba(255, 0, 128, 0.12)';
+                else if (conn.type === 'genre') this.ctx.strokeStyle = 'rgba(0, 128, 255, 0.10)';
+                else if (conn.type === 'collective') this.ctx.strokeStyle = 'rgba(255, 255, 0, 0.10)';
+                else this.ctx.strokeStyle = 'rgba(0,255,0,0.08)';
+
+                this.ctx.lineWidth = 1;
                 this.ctx.beginPath();
                 this.ctx.moveTo(fromNode.x, fromNode.y);
                 this.ctx.lineTo(toNode.x, toNode.y);
                 this.ctx.stroke();
-            }
-        });
-        
-        // Draw nodes
-        this.nodes.forEach(node => {
-            const nodeType = this.nodeTypes[node.type];
-            
-            // Draw node circle
-            this.ctx.fillStyle = nodeType.color;
-            this.ctx.beginPath();
-            this.ctx.arc(node.x, node.y, nodeType.radius, 0, Math.PI * 2);
-            this.ctx.fill();
-            
-            // Draw node border for better visibility
-            this.ctx.strokeStyle = nodeType.color;
-            this.ctx.lineWidth = 1;
-            this.ctx.stroke();
-            
-            // Draw label
-            this.ctx.fillStyle = '#00ff00';
-            this.ctx.font = '10px Courier New, monospace';
-            this.ctx.textAlign = 'center';
-            this.ctx.fillText(node.label, node.x, node.y + nodeType.radius + 15);
-        });
+            });
+
+            this.nodes.forEach(node => {
+                if (!this.visibleTypes[node.type]) return;
+                const nodeType = this.nodeTypes[node.type];
+
+                // Draw node with subtle halo for visibility
+                this.ctx.beginPath();
+                this.ctx.fillStyle = nodeType.color;
+                this.ctx.arc(node.x, node.y, nodeType.radius, 0, Math.PI * 2);
+                this.ctx.fill();
+
+                // soft outer ring
+                this.ctx.beginPath();
+                this.ctx.strokeStyle = nodeType.color;
+                this.ctx.globalAlpha = 0.25;
+                this.ctx.lineWidth = 6;
+                this.ctx.arc(node.x, node.y, nodeType.radius + 3, 0, Math.PI * 2);
+                this.ctx.stroke();
+                this.ctx.globalAlpha = 1;
+
+                // label - offset vertically to avoid overlap; use different color for non-artist nodes
+                this.ctx.font = '11px Courier New, monospace';
+                this.ctx.textAlign = 'center';
+                if (node.type === 'artist') this.ctx.fillStyle = '#00ff00';
+                else if (node.type === 'location') this.ctx.fillStyle = '#ff88d0';
+                else if (node.type === 'genre') this.ctx.fillStyle = '#88bfff';
+                else this.ctx.fillStyle = '#ffff88';
+
+                // Split long labels and clamp length
+                const label = String(node.label || '').slice(0, 28);
+                const labelX = node.x;
+                const labelY = node.y + nodeType.radius + 14;
+                // draw a subtle background for readability
+                const metrics = this.ctx.measureText(label);
+                const pad = 6;
+                this.ctx.fillStyle = 'rgba(0,0,0,0.5)';
+                this.ctx.fillRect(labelX - metrics.width / 2 - pad/2, labelY - 11, metrics.width + pad, 14);
+
+                // draw text on top
+                if (node.type === 'artist') this.ctx.fillStyle = '#00ff00';
+                else if (node.type === 'location') this.ctx.fillStyle = '#ffb0d6';
+                else if (node.type === 'genre') this.ctx.fillStyle = '#bcdcff';
+                else this.ctx.fillStyle = '#fff7b0';
+                this.ctx.fillText(label, labelX, labelY);
+            });
+        }
         
         this.ctx.restore();
         
@@ -688,6 +905,7 @@ class MusicNetwork {
     
     getNodeAt(pos) {
         return this.nodes.find(node => {
+            if (!this.visibleTypes[node.type]) return false; // ignore hidden types
             const dx = node.x - pos.x;
             const dy = node.y - pos.y;
             const distance = Math.sqrt(dx * dx + dy * dy);
@@ -701,6 +919,9 @@ class MusicNetwork {
 
         if (node) {
             // Start dragging a node (allow dragging all types)
+            // user is interacting -> stop auto-centering temporarily
+            this.autoCentering = false;
+            this.autoCenterTicks = 0;
             this.nodeDragging = true;
             this.draggedNode = node;
             this.nodeDragOffset.x = pos.x - node.x;
@@ -708,8 +929,21 @@ class MusicNetwork {
             // record start position to detect click vs drag
             this._mouseStartPos = { x: node.x, y: node.y };
             // Do not open modal on immediate mousedown; use click/tap release to open
+            // If simulation active, fix the node in the simulation so physics respects manual moves
+            if (this.simulation && this._d3nodes) {
+                const d3node = this._d3nodes.find(n => n.id === node.id);
+                if (d3node) {
+                    d3node.fx = node.x;
+                    d3node.fy = node.y;
+                    // nudge alpha to keep simulation active while dragging
+                    this.simulation.alphaTarget(0.3).restart();
+                }
+            }
         } else {
             // Start panning
+            // user is interacting -> stop auto-centering temporarily
+            this.autoCentering = false;
+            this.autoCenterTicks = 0;
             this.isDragging = true;
             this.dragStart = { x: e.clientX - this.offsetX, y: e.clientY - this.offsetY };
         }
@@ -721,6 +955,14 @@ class MusicNetwork {
             // Move dragged node
             this.draggedNode.x = pos.x - this.nodeDragOffset.x;
             this.draggedNode.y = pos.y - this.nodeDragOffset.y;
+            // update d3 simulation fixed position if present
+            if (this._d3nodes) {
+                const d3node = this._d3nodes.find(n => n.id === this.draggedNode.id);
+                if (d3node) {
+                    d3node.fx = this.draggedNode.x;
+                    d3node.fy = this.draggedNode.y;
+                }
+            }
             this.render();
         } else if (this.isDragging) {
             this.offsetX = e.clientX - this.dragStart.x;
@@ -748,6 +990,16 @@ class MusicNetwork {
 
         this.isDragging = false;
         this.nodeDragging = false;
+        // release simulation fixation if present
+        if (this._d3nodes && this.draggedNode) {
+            const d3node = this._d3nodes.find(n => n.id === this.draggedNode.id);
+            if (d3node) {
+                // clear fixed positions to let physics continue
+                d3node.fx = null;
+                d3node.fy = null;
+                this.simulation.alphaTarget(0);
+            }
+        }
         this.draggedNode = null;
     }
 
@@ -830,12 +1082,25 @@ class MusicNetwork {
 
         if (node) {
             this.nodeDragging = true;
+            // user is interacting -> stop auto-centering temporarily
+            this.autoCentering = false;
+            this.autoCenterTicks = 0;
             this.draggedNode = node;
             this.nodeDragOffset.x = pos.x - node.x;
             this.nodeDragOffset.y = pos.y - node.y;
             // store initial touch position to detect taps vs drags
             this._touchStartPos = { x: pos.x, y: pos.y };
+            if (this._d3nodes) {
+                const d3node = this._d3nodes.find(n => n.id === node.id);
+                if (d3node) {
+                    d3node.fx = node.x;
+                    d3node.fy = node.y;
+                    this.simulation.alphaTarget(0.3).restart();
+                }
+            }
         } else if (e.touches.length === 1) {
+            // user is interacting -> stop auto-centering temporarily
+            this.autoCentering = false;
             this.isDragging = true;
             const touch = e.touches[0];
             this.dragStart = { x: touch.clientX - this.offsetX, y: touch.clientY - this.offsetY };
@@ -869,6 +1134,13 @@ class MusicNetwork {
             const pos = this.getTouchPos(e);
             this.draggedNode.x = pos.x - this.nodeDragOffset.x;
             this.draggedNode.y = pos.y - this.nodeDragOffset.y;
+            if (this._d3nodes) {
+                const d3node = this._d3nodes.find(n => n.id === this.draggedNode.id);
+                if (d3node) {
+                    d3node.fx = this.draggedNode.x;
+                    d3node.fy = this.draggedNode.y;
+                }
+            }
             this.render();
         } else if (this.isDragging && e.touches.length === 1) {
             const touch = e.touches[0];
@@ -901,6 +1173,14 @@ class MusicNetwork {
 
         this.isDragging = false;
         this.nodeDragging = false;
+        if (this._d3nodes && this.draggedNode) {
+            const d3node = this._d3nodes.find(n => n.id === this.draggedNode.id);
+            if (d3node) {
+                d3node.fx = null;
+                d3node.fy = null;
+                this.simulation.alphaTarget(0);
+            }
+        }
         this.draggedNode = null;
         this._touchStartPos = null;
     }
