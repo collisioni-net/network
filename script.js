@@ -86,24 +86,41 @@ class MusicNetwork {
             // Map nodes by id for d3
             const nodes = this.nodes.map(n => Object.assign({}, n));
 
+            // compute node degrees (number of links) so we can bias centering
+            // force toward isolated nodes only
+            const degree = {};
+            links.forEach(l => {
+                const s = l.source;
+                const t = l.target;
+                degree[s] = (degree[s] || 0) + 1;
+                degree[t] = (degree[t] || 0) + 1;
+            });
+
             // Create simulation with many-body, link and collision
             this.simulation = d3.forceSimulation(nodes)
-                .force('link', d3.forceLink(links).id(d => d.id).distance(d => {
-                    // different link distances by type
-                    if (d.type === 'location') return 90;
-                    if (d.type === 'genre') return 110;
-                    if (d.type === 'collective') return 80;
-                    return 100;
-                }).strength(0.32))
+                    .force('link', d3.forceLink(links).id(d => d.id).distance(d => {
+                        // slightly larger link distances for better readability
+                            if (d.type === 'location') return 130;
+                            if (d.type === 'genre') return 150;
+                            if (d.type === 'collective') return 110;
+                            return 140;
+                    }).strength(0.32))
                     // slightly stronger charge to give a bit more movement without overshooting
                     .force('charge', d3.forceManyBody().strength(-24))
                 // center force uses current canvas center
                 .force('center', d3.forceCenter(this.canvas.width / 2, this.canvas.height / 2))
-                // gentle pull toward center for isolated nodes so they don't wander off
-                .force('forceX', d3.forceX(this.canvas.width / 2).strength(0.02))
-                .force('forceY', d3.forceY(this.canvas.height / 2).strength(0.02))
-                // slightly increase collision radius for better separation while keeping them in view
-                .force('collision', d3.forceCollide().radius(d => this.nodeTypes[d.type].radius + 10).iterations(2))
+                // degree-weighted gentle pull toward center: isolated nodes get stronger
+                // pull, connected nodes only a tiny nudge so clusters stay readable
+                .force('forceX', d3.forceX(this.canvas.width / 2).strength(d => {
+                    const deg = degree[d.id] || 0;
+                    return deg <= 1 ? 0.04 : 0.005;
+                }))
+                .force('forceY', d3.forceY(this.canvas.height / 2).strength(d => {
+                    const deg = degree[d.id] || 0;
+                    return deg <= 1 ? 0.04 : 0.005;
+                }))
+                // collision radius nudged back down so connected clusters don't spread too much
+                    .force('collision', d3.forceCollide().radius(d => this.nodeTypes[d.type].radius + 14).iterations(2))
                 .alphaTarget(0)
                 .on('tick', () => {
                     // copy positions back to our canonical nodes array (match by id)
@@ -179,8 +196,8 @@ class MusicNetwork {
         const isMobile = window.innerWidth <= 768;
         const canvasRect = this.canvas.getBoundingClientRect();
         
-        const minDist = isMobile ? 50 : 60; // slightly smaller min distance on mobile
-        const springLen = isMobile ? 100 : 120; // shorter connections on mobile
+    const minDist = isMobile ? 70 : 90; // slightly larger min distance for more spacing
+    const springLen = isMobile ? 140 : 180; // slightly larger spring length for more spread
         
         // Mobile-specific: spread nodes more vertically to use available height
         if (isMobile) {
