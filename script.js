@@ -140,8 +140,8 @@ class MusicNetwork {
 
             // More padding initially for better readability, will compress after settling
             const collisionPadding = 12 + Math.round(scaleFactor * 5);
-            // Even stronger link strength pulls connected nodes (artists sharing genres/locations) very close
-            const linkStrength = Math.max(0.1, 0.7 / scaleFactor);
+            // Reduced link strength so artists don't cluster too tightly via shared connections
+            const linkStrength = Math.max(0.1, 0.3 / scaleFactor);
             // Stronger initial artist repulsion for readability, will soften after settling
             const perTypeCharge = {
                 artist: this.legacyStyle ? -35 * scaleFactor : -45 * scaleFactor,
