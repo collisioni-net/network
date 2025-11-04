@@ -123,10 +123,10 @@ class MusicNetwork {
             this.simulation = d3.forceSimulation(nodes)
                     .force('link', d3.forceLink(links).id(d => d.id).distance(d => {
                         // slightly larger link distances for better readability
-                                    if (d.type === 'location') return (window.innerWidth > 1024 ? 220 : 130);
-                                    if (d.type === 'genre') return (window.innerWidth > 1024 ? 240 : 150);
-                                    if (d.type === 'collective') return (window.innerWidth > 1024 ? 200 : 110);
-                                    return (window.innerWidth > 1024 ? 230 : 140);
+                                    if (d.type === 'location') return (window.innerWidth > 1024 ? 320 : 130);
+                                    if (d.type === 'genre') return (window.innerWidth > 1024 ? 360 : 150);
+                                    if (d.type === 'collective') return (window.innerWidth > 1024 ? 300 : 110);
+                                    return (window.innerWidth > 1024 ? 340 : 140);
                     }).strength(0.32))
                     // slightly stronger charge to give a bit more movement without overshooting
                     .force('charge', d3.forceManyBody().strength(-24))
@@ -143,7 +143,7 @@ class MusicNetwork {
                     return deg <= 1 ? 0.04 : 0.005;
                 }))
                 // collision radius nudged back down so connected clusters don't spread too much
-                    .force('collision', d3.forceCollide().radius(d => this.nodeTypes[d.type].radius + 18).iterations(2))
+                    .force('collision', d3.forceCollide().radius(d => this.nodeTypes[d.type].radius + 28).iterations(2))
                 .alphaTarget(0)
                 .on('tick', () => {
                     // copy positions back to our canonical nodes array (match by id)
@@ -219,8 +219,8 @@ class MusicNetwork {
         const isMobile = window.innerWidth <= 768;
         const canvasRect = this.canvas.getBoundingClientRect();
         
-    const minDist = isMobile ? 80 : 140; // larger min distance on desktop for better separation
-    const springLen = isMobile ? 140 : 260; // larger spring length on desktop for more spread
+    const minDist = isMobile ? 80 : 220; // larger min distance on desktop for better separation
+    const springLen = isMobile ? 140 : 420; // larger spring length on desktop for more spread
         
         // Mobile-specific: spread nodes more vertically to use available height
         if (isMobile) {
@@ -831,8 +831,8 @@ class MusicNetwork {
         // Branch: legacy style (original look) vs enhanced visuals
         if (this.legacyStyle) {
             // Original drawing style (keeps your original look)
-            // connection lines use muted white so they don't overpower labels
-            this.ctx.strokeStyle = 'rgba(255,255,255,0.16)';
+            // connection lines: muted neon green (slightly more saturated)
+            this.ctx.strokeStyle = 'rgba(0,255,0,0.18)';
             this.ctx.lineWidth = 1;
             this.connections.forEach(conn => {
                 const fromNode = this.nodes.find(n => n.id === conn.from);
@@ -879,14 +879,14 @@ class MusicNetwork {
             });
         } else {
             // Enhanced visuals (alternate mode)
-            // use muted white for all connection lines to keep them subtle under labels
+            // use muted neon green for connection lines to match original distribution
             this.connections.forEach(conn => {
                 const fromNode = this.nodes.find(n => n.id === conn.from);
                 const toNode = this.nodes.find(n => n.id === conn.to);
                 if (!fromNode || !toNode) return;
                 if (!this.visibleTypes[fromNode.type] || !this.visibleTypes[toNode.type]) return;
 
-                this.ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+                this.ctx.strokeStyle = 'rgba(0,255,0,0.22)';
                 this.ctx.lineWidth = 1;
                 this.ctx.beginPath();
                 this.ctx.moveTo(fromNode.x, fromNode.y);
