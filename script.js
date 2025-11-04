@@ -95,8 +95,8 @@ class MusicNetwork {
                     if (d.type === 'collective') return 80;
                     return 100;
                 }).strength(0.32))
-                // slightly reduced charge so nodes stay closer together
-                .force('charge', d3.forceManyBody().strength(-20))
+                    // slightly stronger charge to give a bit more movement without overshooting
+                    .force('charge', d3.forceManyBody().strength(-24))
                 // center force uses current canvas center
                 .force('center', d3.forceCenter(this.canvas.width / 2, this.canvas.height / 2))
                 .force('collision', d3.forceCollide().radius(d => this.nodeTypes[d.type].radius + 8).iterations(2))
