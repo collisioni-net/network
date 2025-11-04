@@ -26,6 +26,10 @@ class MusicNetwork {
             collective: { color: '#ffff00', radius: 7 }
         };
 
+    // runtime caches to avoid O(n^2) lookups during render/tick
+    this.nodeMap = new Map();
+    this.connectionRefs = []; // { from: nodeObj, to: nodeObj, type }
+
         // Precompute muted label colors (slightly desaturated / darker)
         this.mutedLabelColor = {};
         for (const k of Object.keys(this.nodeTypes)) {
@@ -76,6 +80,8 @@ class MusicNetwork {
         this.createNodes();
         console.log('Creating connections...');
         this.createConnections();
+    // Ensure indexes are built in case nodes changed
+    this.buildIndexes();
         console.log('Setting up force simulation...');
         this.setupSimulation();
         console.log('Centering view...');
@@ -119,37 +125,78 @@ class MusicNetwork {
                 degree[t] = (degree[t] || 0) + 1;
             });
 
-            // Create simulation with many-body, link and collision
+            // Adapt force parameters to graph size — larger graphs need stronger link distances and tuned charge
+            const nodeCount = nodes.length;
+            const scaleFactor = Math.min(3, Math.max(1, nodeCount / 150)); // for ~400 nodes scaleFactor~2.66
+
+            // base link distances per type; vary significantly for organic feel
+            // Start with much wider spacing for initial readability, will settle closer naturally
+            const baseDistances = {
+                location: window.innerWidth > 1024 ? 200 : 100,
+                genre: window.innerWidth > 1024 ? 220 : 110,
+                collective: window.innerWidth > 1024 ? 190 : 95,
+                default: window.innerWidth > 1024 ? 210 : 105
+            };
+
+            // More padding initially for better readability, will compress after settling
+            const collisionPadding = 12 + Math.round(scaleFactor * 5);
+            // Even stronger link strength pulls connected nodes (artists sharing genres/locations) very close
+            const linkStrength = Math.max(0.1, 0.7 / scaleFactor);
+            // Stronger initial artist repulsion for readability, will soften after settling
+            const perTypeCharge = {
+                artist: this.legacyStyle ? -35 * scaleFactor : -45 * scaleFactor,
+                location: this.legacyStyle ? -45 * scaleFactor : -55 * scaleFactor,
+                genre: this.legacyStyle ? -50 * scaleFactor : -60 * scaleFactor,
+                collective: this.legacyStyle ? -35 * scaleFactor : -45 * scaleFactor
+            };
+            // Highly variable link distances based on degree create natural clustering
+            const linkTypeMultiplier = { location: 0.8, genre: 0.85, collective: 0.75, default: 1 };
+            // Moderate collision enforcement for organic packing
+            const collisionTypeMultiplier = { artist: 0.9, location: 1.1, genre: 1.2, collective: 1.0 };
+
+            // Create simulation with optimized forces
             this.simulation = d3.forceSimulation(nodes)
-                    .force('link', d3.forceLink(links).id(d => d.id).distance(d => {
-                        // slightly larger link distances for better readability
-                                    if (d.type === 'location') return (window.innerWidth > 1024 ? 320 : 130);
-                                    if (d.type === 'genre') return (window.innerWidth > 1024 ? 360 : 150);
-                                    if (d.type === 'collective') return (window.innerWidth > 1024 ? 300 : 110);
-                                    return (window.innerWidth > 1024 ? 340 : 140);
-                    }).strength(0.32))
-                    // slightly stronger charge to give a bit more movement without overshooting
-                    .force('charge', d3.forceManyBody().strength(-24))
-                // center force uses current canvas center
+                .force('link', d3.forceLink(links).id(d => d.id).distance(link => {
+                    const t = link.type || 'default';
+                    const mult = linkTypeMultiplier[t] || linkTypeMultiplier.default;
+                    // Strong degree-based variation: highly connected nodes form tight clusters
+                    const srcDeg = degree[link.source.id || link.source] || 0;
+                    const tgtDeg = degree[link.target.id || link.target] || 0;
+                    const avgDeg = (srcDeg + tgtDeg) / 2;
+                    
+                    // More aggressive degree scaling for organic clustering
+                    // High-degree nodes: much shorter links (0.4x base for initial spread)
+                    // Low-degree nodes: longer links (1.0x base)
+                    const degreeScale = Math.max(0.4, 1 - (avgDeg / 12));
+                    
+                    // Add slight randomness for organic feel (±10%)
+                    const randomVariation = 0.9 + Math.random() * 0.2;
+                    
+                    return (baseDistances[t] || baseDistances.default) * scaleFactor * mult * degreeScale * randomVariation;
+                }).strength(linkStrength))
+                .force('charge', d3.forceManyBody().strength(d => perTypeCharge[d.type] || (perTypeCharge.default || -8)))
                 .force('center', d3.forceCenter(this.canvas.width / 2, this.canvas.height / 2))
-                // degree-weighted gentle pull toward center: isolated nodes get stronger
-                // pull, connected nodes only a tiny nudge so clusters stay readable
                 .force('forceX', d3.forceX(this.canvas.width / 2).strength(d => {
                     const deg = degree[d.id] || 0;
-                    return deg <= 1 ? 0.04 : 0.005;
+                    // High-degree nodes pulled to center, low-degree drift to periphery naturally
+                    return deg <= 1 ? 0.02 : Math.min(0.12, 0.02 + deg * 0.01);
                 }))
                 .force('forceY', d3.forceY(this.canvas.height / 2).strength(d => {
                     const deg = degree[d.id] || 0;
-                    return deg <= 1 ? 0.04 : 0.005;
+                    // High-degree nodes pulled to center, low-degree drift to periphery naturally
+                    return deg <= 1 ? 0.02 : Math.min(0.12, 0.02 + deg * 0.01);
                 }))
-                // collision radius nudged back down so connected clusters don't spread too much
-                    .force('collision', d3.forceCollide().radius(d => this.nodeTypes[d.type].radius + 28).iterations(2))
-                .alphaTarget(0)
+                .force('collision', d3.forceCollide().radius(d => {
+                    const mult = collisionTypeMultiplier[d.type] || 1;
+                    return this.nodeTypes[d.type].radius + Math.round(collisionPadding * mult);
+                }).strength(0.8).iterations(2)) // Stronger collision initially for better spacing
+                .alphaDecay(0.028) // Slightly faster decay to reach readable state
+                .alphaMin(0.001)
                 .on('tick', () => {
-                    // copy positions back to our canonical nodes array (match by id)
+                    // copy positions back efficiently using map
                     for (let i = 0; i < nodes.length; i++) {
                         const nd = nodes[i];
-                        const local = this.nodes.find(x => x.id === nd.id);
+                        const local = this.nodeMap.get(nd.id);
                         if (local) {
                             local.x = nd.x;
                             local.y = nd.y;
@@ -157,6 +204,7 @@ class MusicNetwork {
                             local.vy = nd.vy;
                         }
                     }
+
                     // Auto-center only for a short countdown after load/reset
                     if (this.autoCenterTicks > 0) {
                         const bounds = this.getBounds();
@@ -166,19 +214,23 @@ class MusicNetwork {
                         this.offsetX = containerRect.width / 2 - centerX;
                         this.offsetY = containerRect.height / 2 - centerY;
                         this.autoCenterTicks -= 1;
-                        if (this.autoCenterTicks <= 0) this.autoCentering = false;
-                        else this.autoCentering = true;
+                        this.autoCentering = this.autoCenterTicks > 0;
                     }
 
                     // Clamp nodes to remain inside visible canvas area with padding
                     const rect = this.canvas.getBoundingClientRect();
-                    const paddingClamp = 40; // keep nodes this far from edges
+                    const paddingClamp = 30; // keep nodes this far from edges (slightly reduced)
                     for (let i = 0; i < nodes.length; i++) {
                         const nd = nodes[i];
                         nd.x = Math.max(paddingClamp, Math.min(rect.width - paddingClamp, nd.x));
                         nd.y = Math.max(paddingClamp, Math.min(rect.height - paddingClamp, nd.y));
                     }
-                    this.render();
+
+                    // render at most every few ticks for performance on large graphs
+                    if (!this._lastRenderTick || (Date.now() - this._lastRenderTick) > 30) {
+                        this.render();
+                        this._lastRenderTick = Date.now();
+                    }
                 });
 
             // when simulation finishes settling, only center if this was the
@@ -187,9 +239,12 @@ class MusicNetwork {
             this.simulation.on('end', () => {
                 try {
                     if (initialAutoCenter) {
-                        this.centerView();
+                        this.fitToScreen();
                         this.render();
                     }
+                    // After the simulation settles, drastically reduce repulsion and
+                    // centering so users can rearrange nodes freely without strong forces.
+                    this._softenSimulationForInteraction();
                 } catch (e) {
                     // ignore
                 }
@@ -197,17 +252,67 @@ class MusicNetwork {
 
             // Attach drag handlers that interact with the simulation
             this._d3nodes = nodes;
+            // fast lookup for d3 nodes by id to avoid repeated array.find calls
+            this._d3nodeMap = new Map(this._d3nodes.map(n => [n.id, n]));
             this._d3links = links;
 
-            // reduce initial alpha to settle quicker
-            this.simulation.alpha(0.6).restart();
+            // Start with higher alpha for good initial spread
+            this.simulation.alpha(1.0).restart();
             // enable auto-centering briefly after loading
             this.autoCenterTicks = 80; // number of ticks to auto-center for (tuneable)
             this.autoCentering = true;
+
+            // ensure nodeMap exists so tick copy works
+            if (!this.nodeMap || this.nodeMap.size === 0) this.buildIndexes();
         } catch (err) {
             console.error('Error initializing d3 simulation:', err);
             // fallback to previous runLayout behavior
             this.runLayout();
+        }
+    }
+
+    // Soften simulation so manual user interaction persists: lower charge, increased collision softness
+    _softenSimulationForInteraction() {
+        if (!this.simulation) return;
+        try {
+            // Reduce forces after initial layout settles, allowing natural clustering
+            // Set charge to gentle repulsion so nodes can be closer together
+            if (this.simulation.force('charge')) this.simulation.force('charge').strength(() => -1.5);
+            // Disable strong centering/anchoring influences so nodes stay where users place them.
+            // IMPORTANT: do NOT set the center to (0,0) — that pulls everything to the corner.
+            // Instead, remove the center/forceX/forceY forces so they no longer influence positions.
+            try { if (typeof d3 !== 'undefined') this.simulation.force('center', null); } catch (e) {}
+            try { if (typeof d3 !== 'undefined') this.simulation.force('forceX', null); } catch (e) {}
+            try { if (typeof d3 !== 'undefined') this.simulation.force('forceY', null); } catch (e) {}
+            // Soften collisions a lot to make overlapping and tight packing possible through manual moves
+            if (this.simulation.force('collision')) this.simulation.force('collision').radius(d => this.nodeTypes[d.type].radius + 4).iterations(1);
+            // Make simulation passive: no continuous alpha target, but allow tiny nudges
+            this.simulation.alphaTarget(0);
+            // apply changes gently
+            this.simulation.restart();
+        } catch (e) {
+            // ignore
+        }
+    }
+
+    // Harden simulation when user clicks Reset or when we want the layout to re-run
+    _hardenSimulationForLayout() {
+        if (!this.simulation) return;
+        try {
+            const scale = Math.min(3, Math.max(1, this.nodes.length / 150));
+            const charge = this.legacyStyle ? -12 * scale : -26 * scale;
+            if (this.simulation.force('charge')) this.simulation.force('charge').strength(charge);
+            // Restore centering and directional forces so layout converges
+            if (typeof d3 !== 'undefined') {
+                this.simulation.force('center', d3.forceCenter(this.canvas.width / 2, this.canvas.height / 2));
+                this.simulation.force('forceX', d3.forceX(this.canvas.width / 2).strength(0.02));
+                this.simulation.force('forceY', d3.forceY(this.canvas.height / 2).strength(0.02));
+            }
+            if (this.simulation.force('collision')) this.simulation.force('collision').radius(d => this.nodeTypes[d.type].radius + 8 + Math.round(scale * 6)).iterations(2);
+            // nudge alpha to let layout run again with stronger forces
+            this.simulation.alpha(0.6).restart();
+        } catch (e) {
+            // ignore
         }
     }
 
@@ -219,8 +324,8 @@ class MusicNetwork {
         const isMobile = window.innerWidth <= 768;
         const canvasRect = this.canvas.getBoundingClientRect();
         
-    const minDist = isMobile ? 80 : 220; // larger min distance on desktop for better separation
-    const springLen = isMobile ? 140 : 420; // larger spring length on desktop for more spread
+    const minDist = isMobile ? 30 : 60; // allow nodes to be closer in fallback layout
+    const springLen = isMobile ? 60 : 120; // shorter spring length so connections pull nodes closer
         
         // Mobile-specific: spread nodes more vertically to use available height
         if (isMobile) {
@@ -284,6 +389,8 @@ class MusicNetwork {
             n.y = Math.max(padding, Math.min(canvasRect.height - padding, n.y));
         }
         console.log('Layout complete');
+        // fit the graph to fill the screen after fallback layout
+        this.fitToScreen();
     }
     
     setupCanvas() {
@@ -351,10 +458,11 @@ class MusicNetwork {
             // enable auto-centering briefly after reset
             this.autoCenterTicks = 80;
             this.autoCentering = true;
-            this.centerView();
+            this.fitToScreen();
             if (this.simulation && typeof d3 !== 'undefined') {
                 this.simulation.force('center', d3.forceCenter(this.canvas.width / 2, this.canvas.height / 2));
-                this.simulation.alpha(0.3).restart();
+                // harden forces and re-run layout when user requests reset
+                this._hardenSimulationForLayout();
             }
             this.render();
         });
@@ -390,6 +498,8 @@ class MusicNetwork {
                         // visual feedback: toggle opacity
                         it.style.opacity = this.visibleTypes[type] ? '1' : '0.35';
                         // If hiding some node types, we may want to hide their nodes & links
+                        // Rebuild connection refs in case visibility affects pruning elsewhere
+                        this.buildIndexes();
                         this.render();
                         // nudge simulation to reposition remaining nodes
                         if (this.simulation) {
@@ -609,9 +719,9 @@ class MusicNetwork {
                     x = Math.random() * (containerRect.width * 0.6) + containerRect.width * 0.2;
                     y = Math.random() * (containerRect.height * 0.8) + containerRect.height * 0.1;
                 } else {
-                    // Desktop: original positioning
-                    x = Math.random() * 300 + 100;
-                    y = Math.random() * 300 + 100;
+                    // Desktop: spread nodes widely for initial positioning
+                    x = Math.random() * (containerRect.width * 0.7) + containerRect.width * 0.15;
+                    y = Math.random() * (containerRect.height * 0.7) + containerRect.height * 0.15;
                 }
 
                 const node = {
@@ -652,8 +762,9 @@ class MusicNetwork {
                 x = Math.random() * (containerRect.width * 0.6) + containerRect.width * 0.2;
                 y = Math.random() * (containerRect.height * 0.8) + containerRect.height * 0.1;
             } else {
-                x = Math.random() * 300 + 100;
-                y = Math.random() * 300 + 100;
+                // Desktop: spread nodes widely for initial positioning
+                x = Math.random() * (containerRect.width * 0.7) + containerRect.width * 0.15;
+                y = Math.random() * (containerRect.height * 0.7) + containerRect.height * 0.15;
             }
 
             const node = {
@@ -679,8 +790,9 @@ class MusicNetwork {
                 x = Math.random() * (containerRect.width * 0.6) + containerRect.width * 0.2;
                 y = Math.random() * (containerRect.height * 0.8) + containerRect.height * 0.1;
             } else {
-                x = Math.random() * 300 + 100;
-                y = Math.random() * 300 + 100;
+                // Desktop: spread nodes widely for initial positioning
+                x = Math.random() * (containerRect.width * 0.7) + containerRect.width * 0.15;
+                y = Math.random() * (containerRect.height * 0.7) + containerRect.height * 0.15;
             }
 
             const node = {
@@ -706,8 +818,9 @@ class MusicNetwork {
                 x = Math.random() * (containerRect.width * 0.6) + containerRect.width * 0.2;
                 y = Math.random() * (containerRect.height * 0.8) + containerRect.height * 0.1;
             } else {
-                x = Math.random() * 300 + 100;
-                y = Math.random() * 300 + 100;
+                // Desktop: spread nodes widely for initial positioning
+                x = Math.random() * (containerRect.width * 0.7) + containerRect.width * 0.15;
+                y = Math.random() * (containerRect.height * 0.7) + containerRect.height * 0.15;
             }
 
             const node = {
@@ -777,6 +890,18 @@ class MusicNetwork {
         });
         
         console.log('Created connections:', this.connections.length);
+        // build quick lookup structures used by rendering and the simulation tick
+        this.buildIndexes();
+    }
+
+    // Build in-memory indexes and object references to avoid repeated .find() calls
+    buildIndexes() {
+        this.nodeMap = new Map(this.nodes.map(n => [n.id, n]));
+        this.connectionRefs = this.connections.map(c => ({
+            from: this.nodeMap.get(c.from) || null,
+            to: this.nodeMap.get(c.to) || null,
+            type: c.type
+        }));
     }
     
     centerView() {
@@ -802,6 +927,52 @@ class MusicNetwork {
             canvasSize: { width: containerRect.width, height: containerRect.height }
         });
     }
+
+    // Scale and offset the graph to fill the available canvas with appropriate margins
+    fitToScreen() {
+        if (this.nodes.length === 0) {
+            console.log('No nodes to fit');
+            return;
+        }
+        
+        const bounds = this.getBounds();
+        const containerRect = this.canvas.getBoundingClientRect();
+        
+        // compute graph dimensions
+        const graphWidth = bounds.maxX - bounds.minX;
+        const graphHeight = bounds.maxY - bounds.minY;
+        
+        // desired margins (pixels in canvas space)
+        const margin = 80;
+        const availableWidth = containerRect.width - 2 * margin;
+        const availableHeight = containerRect.height - 2 * margin;
+        
+        // compute scale to fit graph in available space (with some breathing room)
+        let scale = 1;
+        if (graphWidth > 0 && graphHeight > 0) {
+            const scaleX = availableWidth / graphWidth;
+            const scaleY = availableHeight / graphHeight;
+            scale = Math.min(scaleX, scaleY, 1.2); // cap max scale at 1.2 to avoid over-zooming small graphs
+            scale = Math.max(scale, 0.3); // ensure minimum scale so graph doesn't get too tiny
+        }
+        
+        // compute center of graph in original coords
+        const centerX = (bounds.minX + bounds.maxX) / 2;
+        const centerY = (bounds.minY + bounds.maxY) / 2;
+        
+        // set offset so graph center aligns with canvas center after scaling
+        this.offsetX = containerRect.width / 2 - centerX * scale;
+        this.offsetY = containerRect.height / 2 - centerY * scale;
+        this.scale = scale;
+        
+        console.log('Fit to screen:', { 
+            graphWidth, graphHeight,
+            scale: this.scale,
+            offsetX: this.offsetX, 
+            offsetY: this.offsetY,
+            canvasSize: { width: containerRect.width, height: containerRect.height }
+        });
+    }
     
     getBounds() {
         if (this.nodes.length === 0) return { minX: 0, maxX: 0, minY: 0, maxY: 0 };
@@ -821,10 +992,7 @@ class MusicNetwork {
     
     render() {
         const rect = this.canvas.getBoundingClientRect();
-        this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-        
-        console.log('Rendering with', this.nodes.length, 'nodes');
-        
+    this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
         this.ctx.save();
         this.ctx.translate(this.offsetX, this.offsetY);
         this.ctx.scale(this.scale, this.scale);
@@ -832,20 +1000,18 @@ class MusicNetwork {
         if (this.legacyStyle) {
             // Original drawing style (keeps your original look)
             // connection lines: muted neon green (slightly more saturated)
-            this.ctx.strokeStyle = 'rgba(0,255,0,0.18)';
+            // slightly more contrasty but still light lines for overview
             this.ctx.lineWidth = 1;
-            this.connections.forEach(conn => {
-                const fromNode = this.nodes.find(n => n.id === conn.from);
-                const toNode = this.nodes.find(n => n.id === conn.to);
-                if (fromNode && toNode) {
-                    // skip drawing if either node's type is hidden
-                    if (!this.visibleTypes[fromNode.type] || !this.visibleTypes[toNode.type]) return;
-                    this.ctx.beginPath();
-                    this.ctx.moveTo(fromNode.x, fromNode.y);
-                    this.ctx.lineTo(toNode.x, toNode.y);
-                    this.ctx.stroke();
-                }
-            });
+            // stronger opacity for readability
+            this.ctx.strokeStyle = 'rgba(0,255,0,0.55)';
+            for (const cref of this.connectionRefs) {
+                if (!cref.from || !cref.to) continue;
+                if (!this.visibleTypes[cref.from.type] || !this.visibleTypes[cref.to.type]) continue;
+                this.ctx.beginPath();
+                this.ctx.moveTo(cref.from.x, cref.from.y);
+                this.ctx.lineTo(cref.to.x, cref.to.y);
+                this.ctx.stroke();
+            }
 
             this.nodes.forEach(node => {
                 if (!this.visibleTypes[node.type]) return; // skip hidden types
@@ -862,16 +1028,15 @@ class MusicNetwork {
                 this.ctx.lineWidth = 1;
                 this.ctx.stroke();
 
-                // Draw label (original styling) using muted color for each type
-                // Draw a solid black background rectangle behind the text so labels sit on top of lines
-                const label = String(node.label || '').slice(0, 28);
-                this.ctx.font = '10px Courier New, monospace';
+                // Draw label with larger font for readability
+                const label = String(node.label || '').slice(0, 36);
+                this.ctx.font = '12px Courier New, monospace';
                 const metrics = this.ctx.measureText(label);
-                const pad = 6;
+                const pad = 8;
                 const labelX = node.x;
-                const labelY = node.y + nodeType.radius + 15;
-                this.ctx.fillStyle = '#000000';
-                this.ctx.fillRect(labelX - metrics.width / 2 - pad/2, labelY - 10, metrics.width + pad, 14);
+                const labelY = node.y + nodeType.radius + 16;
+                this.ctx.fillStyle = 'rgba(0, 0, 0, 0.7)'; // Semi-transparent black background
+                this.ctx.fillRect(labelX - metrics.width / 2 - pad/2, labelY - 12, metrics.width + pad, 16);
 
                 this.ctx.fillStyle = this.mutedLabelColor[node.type] || '#999999';
                 this.ctx.textAlign = 'center';
@@ -880,19 +1045,18 @@ class MusicNetwork {
         } else {
             // Enhanced visuals (alternate mode)
             // use muted neon green for connection lines to match original distribution
-            this.connections.forEach(conn => {
-                const fromNode = this.nodes.find(n => n.id === conn.from);
-                const toNode = this.nodes.find(n => n.id === conn.to);
-                if (!fromNode || !toNode) return;
-                if (!this.visibleTypes[fromNode.type] || !this.visibleTypes[toNode.type]) return;
-
-                this.ctx.strokeStyle = 'rgba(0,255,0,0.22)';
-                this.ctx.lineWidth = 1;
+            // lighter lines in enhanced mode
+            this.ctx.lineWidth = 1;
+            // stronger opacity in enhanced mode as well
+            this.ctx.strokeStyle = 'rgba(0,255,0,0.60)';
+            for (const cref of this.connectionRefs) {
+                if (!cref.from || !cref.to) continue;
+                if (!this.visibleTypes[cref.from.type] || !this.visibleTypes[cref.to.type]) continue;
                 this.ctx.beginPath();
-                this.ctx.moveTo(fromNode.x, fromNode.y);
-                this.ctx.lineTo(toNode.x, toNode.y);
+                this.ctx.moveTo(cref.from.x, cref.from.y);
+                this.ctx.lineTo(cref.to.x, cref.to.y);
                 this.ctx.stroke();
-            });
+            }
 
             this.nodes.forEach(node => {
                 if (!this.visibleTypes[node.type]) return;
@@ -914,14 +1078,14 @@ class MusicNetwork {
                 this.ctx.globalAlpha = 1;
 
                 // label - offset vertically to avoid overlap; use muted color derived from node color
-                this.ctx.font = '11px Courier New, monospace';
+                this.ctx.font = '13px Courier New, monospace';
                 this.ctx.textAlign = 'center';
                 this.ctx.fillStyle = this.mutedLabelColor[node.type] || '#cccccc';
 
                 // Split long labels and clamp length
-                const label = String(node.label || '').slice(0, 28);
+                const label = String(node.label || '').slice(0, 36);
                 const labelX = node.x;
-                const labelY = node.y + nodeType.radius + 14;
+                const labelY = node.y + nodeType.radius + 16;
                 // draw a subtle background for readability
                 const metrics = this.ctx.measureText(label);
                 const pad = 6;
@@ -965,6 +1129,13 @@ class MusicNetwork {
             return distance <= this.nodeTypes[node.type].radius + 5;
         });
     }
+
+    // helper to get d3 node by id (if simulation present)
+    _getD3Node(id) {
+        if (this._d3nodeMap) return this._d3nodeMap.get(id) || null;
+        if (this._d3nodes) return this._d3nodes.find(n => n.id === id) || null;
+        return null;
+    }
     
     handleMouseDown(e) {
         const pos = this.getMousePos(e);
@@ -979,17 +1150,18 @@ class MusicNetwork {
             this.draggedNode = node;
             this.nodeDragOffset.x = pos.x - node.x;
             this.nodeDragOffset.y = pos.y - node.y;
-            // record start position to detect click vs drag
-            this._mouseStartPos = { x: node.x, y: node.y };
+            // record pointer start to detect click vs drag
+            this._mouseDownPos = { x: pos.x, y: pos.y };
+            this._mouseStartNodePos = { x: node.x, y: node.y };
             // Do not open modal on immediate mousedown; use click/tap release to open
             // If simulation active, fix the node in the simulation so physics respects manual moves
-            if (this.simulation && this._d3nodes) {
-                const d3node = this._d3nodes.find(n => n.id === node.id);
+            if (this.simulation) {
+                const d3node = this._getD3Node(node.id);
                 if (d3node) {
                     d3node.fx = node.x;
                     d3node.fy = node.y;
-                    // nudge alpha to keep simulation active while dragging
-                    this.simulation.alphaTarget(0.3).restart();
+                    // keep simulation lightly active while dragging so connected nodes behave
+                    this.simulation.alphaTarget(0.2).restart();
                 }
             }
         } else {
@@ -1008,9 +1180,9 @@ class MusicNetwork {
             // Move dragged node
             this.draggedNode.x = pos.x - this.nodeDragOffset.x;
             this.draggedNode.y = pos.y - this.nodeDragOffset.y;
-            // update d3 simulation fixed position if present
-            if (this._d3nodes) {
-                const d3node = this._d3nodes.find(n => n.id === this.draggedNode.id);
+            // update d3 simulation fixed position if present (use fast map)
+            if (this.simulation) {
+                const d3node = this._getD3Node(this.draggedNode.id);
                 if (d3node) {
                     d3node.fx = this.draggedNode.x;
                     d3node.fy = this.draggedNode.y;
@@ -1029,11 +1201,11 @@ class MusicNetwork {
         const pos = this.getMousePos(e);
         if (this.nodeDragging && this.draggedNode) {
             const node = this.draggedNode;
-            // compare node current position to where it started
-            const start = this._mouseStartPos || { x: node.x, y: node.y };
-            const dx = node.x - start.x;
-            const dy = node.y - start.y;
-            const moved = Math.sqrt(dx*dx + dy*dy) > 8; // threshold for mouse - avoid accidental clicks
+            // compare pointer movement to see whether this was a click or a drag
+            const down = this._mouseDownPos || { x: node.x, y: node.y };
+            const dx = node.x - this._mouseStartNodePos.x;
+            const dy = node.y - this._mouseStartNodePos.y;
+            const moved = Math.sqrt(dx*dx + dy*dy) > 6; // slightly lower threshold for responsiveness
             if (!moved) {
                 // It was a click (no significant movement)
                 if (node.type === 'artist') this.showArtistModal(node.data);
@@ -1043,17 +1215,20 @@ class MusicNetwork {
 
         this.isDragging = false;
         this.nodeDragging = false;
-        // release simulation fixation if present
-        if (this._d3nodes && this.draggedNode) {
-            const d3node = this._d3nodes.find(n => n.id === this.draggedNode.id);
+        // release simulation fixation if present: clear fx/fy using fast map and lightly nudge simulation
+        if (this.simulation && this.draggedNode) {
+            const d3node = this._getD3Node(this.draggedNode.id);
             if (d3node) {
-                // clear fixed positions to let physics continue
                 d3node.fx = null;
                 d3node.fy = null;
-                this.simulation.alphaTarget(0);
+                // lightly nudge simulation so layout responds subtly, then settle
+                this.simulation.alphaTarget(0.04);
+                setTimeout(() => { if (this.simulation) this.simulation.alphaTarget(0); }, 400);
             }
         }
         this.draggedNode = null;
+        this._mouseDownPos = null;
+        this._mouseStartNodePos = null;
     }
 
     // helper to show a group modal (for location or genre) listing matching artists
@@ -1143,12 +1318,13 @@ class MusicNetwork {
             this.nodeDragOffset.y = pos.y - node.y;
             // store initial touch position to detect taps vs drags
             this._touchStartPos = { x: pos.x, y: pos.y };
-            if (this._d3nodes) {
-                const d3node = this._d3nodes.find(n => n.id === node.id);
+            this._touchStartNodePos = { x: node.x, y: node.y };
+            if (this.simulation) {
+                const d3node = this._getD3Node(node.id);
                 if (d3node) {
                     d3node.fx = node.x;
                     d3node.fy = node.y;
-                    this.simulation.alphaTarget(0.3).restart();
+                    this.simulation.alphaTarget(0.2).restart();
                 }
             }
         } else if (e.touches.length === 1) {
@@ -1187,8 +1363,8 @@ class MusicNetwork {
             const pos = this.getTouchPos(e);
             this.draggedNode.x = pos.x - this.nodeDragOffset.x;
             this.draggedNode.y = pos.y - this.nodeDragOffset.y;
-            if (this._d3nodes) {
-                const d3node = this._d3nodes.find(n => n.id === this.draggedNode.id);
+            if (this.simulation) {
+                const d3node = this._getD3Node(this.draggedNode.id);
                 if (d3node) {
                     d3node.fx = this.draggedNode.x;
                     d3node.fy = this.draggedNode.y;
@@ -1226,16 +1402,19 @@ class MusicNetwork {
 
         this.isDragging = false;
         this.nodeDragging = false;
-        if (this._d3nodes && this.draggedNode) {
-            const d3node = this._d3nodes.find(n => n.id === this.draggedNode.id);
+        if (this.simulation && this.draggedNode) {
+            const d3node = this._getD3Node(this.draggedNode.id);
             if (d3node) {
                 d3node.fx = null;
                 d3node.fy = null;
-                this.simulation.alphaTarget(0);
+                // lightly nudge simulation so layout responds subtly, then settle
+                this.simulation.alphaTarget(0.04);
+                setTimeout(() => { if (this.simulation) this.simulation.alphaTarget(0); }, 400);
             }
         }
         this.draggedNode = null;
         this._touchStartPos = null;
+        this._touchStartNodePos = null;
     }
     
     handleWheel(e) {
