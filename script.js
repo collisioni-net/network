@@ -21,10 +21,16 @@ class MusicNetwork {
         // Node types and colors
         this.nodeTypes = {
             artist: { color: '#00ff00', radius: 8 },
-            location: { color: '#ff0080', radius: 6 },
+            location: { color: '#ff0080', radius: 5 },
             genre: { color: '#0080ff', radius: 6 },
             collective: { color: '#ffff00', radius: 7 }
         };
+
+        // Precompute muted label colors (slightly desaturated / darker)
+        this.mutedLabelColor = {};
+        for (const k of Object.keys(this.nodeTypes)) {
+            this.mutedLabelColor[k] = this._mutedColor(this.nodeTypes[k].color, 0.5);
+        }
 
         // Keep original canvas styling by default (set to false to use enhanced visuals)
         this.legacyStyle = true;
@@ -42,6 +48,23 @@ class MusicNetwork {
     this.autoCenterTicks = 0;   // number of ticks to auto-center for
         
         this.init();
+    }
+
+    // Return a muted version of a hex color by blending toward middle grey
+    _mutedColor(hex, amount = 0.5) {
+        try {
+            const h = hex.replace('#','');
+            const r = parseInt(h.substring(0,2),16);
+            const g = parseInt(h.substring(2,4),16);
+            const b = parseInt(h.substring(4,6),16);
+            const mr = Math.round(r * (1 - amount) + 128 * amount);
+            const mg = Math.round(g * (1 - amount) + 128 * amount);
+            const mb = Math.round(b * (1 - amount) + 128 * amount);
+            const toHex = (v) => ('0' + v.toString(16)).slice(-2);
+            return `#${toHex(mr)}${toHex(mg)}${toHex(mb)}`;
+        } catch (e) {
+            return hex;
+        }
     }
     
     async init() {
@@ -100,10 +123,10 @@ class MusicNetwork {
             this.simulation = d3.forceSimulation(nodes)
                     .force('link', d3.forceLink(links).id(d => d.id).distance(d => {
                         // slightly larger link distances for better readability
-                            if (d.type === 'location') return 130;
-                            if (d.type === 'genre') return 150;
-                            if (d.type === 'collective') return 110;
-                            return 140;
+                                    if (d.type === 'location') return (window.innerWidth > 1024 ? 220 : 130);
+                                    if (d.type === 'genre') return (window.innerWidth > 1024 ? 240 : 150);
+                                    if (d.type === 'collective') return (window.innerWidth > 1024 ? 200 : 110);
+                                    return (window.innerWidth > 1024 ? 230 : 140);
                     }).strength(0.32))
                     // slightly stronger charge to give a bit more movement without overshooting
                     .force('charge', d3.forceManyBody().strength(-24))
@@ -120,7 +143,7 @@ class MusicNetwork {
                     return deg <= 1 ? 0.04 : 0.005;
                 }))
                 // collision radius nudged back down so connected clusters don't spread too much
-                    .force('collision', d3.forceCollide().radius(d => this.nodeTypes[d.type].radius + 14).iterations(2))
+                    .force('collision', d3.forceCollide().radius(d => this.nodeTypes[d.type].radius + 18).iterations(2))
                 .alphaTarget(0)
                 .on('tick', () => {
                     // copy positions back to our canonical nodes array (match by id)
@@ -196,8 +219,8 @@ class MusicNetwork {
         const isMobile = window.innerWidth <= 768;
         const canvasRect = this.canvas.getBoundingClientRect();
         
-    const minDist = isMobile ? 70 : 90; // slightly larger min distance for more spacing
-    const springLen = isMobile ? 140 : 180; // slightly larger spring length for more spread
+    const minDist = isMobile ? 80 : 140; // larger min distance on desktop for better separation
+    const springLen = isMobile ? 140 : 260; // larger spring length on desktop for more spread
         
         // Mobile-specific: spread nodes more vertically to use available height
         if (isMobile) {
@@ -808,7 +831,8 @@ class MusicNetwork {
         // Branch: legacy style (original look) vs enhanced visuals
         if (this.legacyStyle) {
             // Original drawing style (keeps your original look)
-            this.ctx.strokeStyle = '#00ff0040';
+            // connection lines use muted white so they don't overpower labels
+            this.ctx.strokeStyle = 'rgba(255,255,255,0.16)';
             this.ctx.lineWidth = 1;
             this.connections.forEach(conn => {
                 const fromNode = this.nodes.find(n => n.id === conn.from);
@@ -838,26 +862,31 @@ class MusicNetwork {
                 this.ctx.lineWidth = 1;
                 this.ctx.stroke();
 
-                // Draw label (original styling)
-                this.ctx.fillStyle = '#00ff00';
+                // Draw label (original styling) using muted color for each type
+                // Draw a solid black background rectangle behind the text so labels sit on top of lines
+                const label = String(node.label || '').slice(0, 28);
                 this.ctx.font = '10px Courier New, monospace';
+                const metrics = this.ctx.measureText(label);
+                const pad = 6;
+                const labelX = node.x;
+                const labelY = node.y + nodeType.radius + 15;
+                this.ctx.fillStyle = '#000000';
+                this.ctx.fillRect(labelX - metrics.width / 2 - pad/2, labelY - 10, metrics.width + pad, 14);
+
+                this.ctx.fillStyle = this.mutedLabelColor[node.type] || '#999999';
                 this.ctx.textAlign = 'center';
-                this.ctx.fillText(node.label, node.x, node.y + nodeType.radius + 15);
+                this.ctx.fillText(label, labelX, labelY);
             });
         } else {
             // Enhanced visuals (alternate mode)
+            // use muted white for all connection lines to keep them subtle under labels
             this.connections.forEach(conn => {
                 const fromNode = this.nodes.find(n => n.id === conn.from);
                 const toNode = this.nodes.find(n => n.id === conn.to);
                 if (!fromNode || !toNode) return;
                 if (!this.visibleTypes[fromNode.type] || !this.visibleTypes[toNode.type]) return;
 
-                // style by type
-                if (conn.type === 'location') this.ctx.strokeStyle = 'rgba(255, 0, 128, 0.12)';
-                else if (conn.type === 'genre') this.ctx.strokeStyle = 'rgba(0, 128, 255, 0.10)';
-                else if (conn.type === 'collective') this.ctx.strokeStyle = 'rgba(255, 255, 0, 0.10)';
-                else this.ctx.strokeStyle = 'rgba(0,255,0,0.08)';
-
+                this.ctx.strokeStyle = 'rgba(255,255,255,0.18)';
                 this.ctx.lineWidth = 1;
                 this.ctx.beginPath();
                 this.ctx.moveTo(fromNode.x, fromNode.y);
@@ -884,13 +913,10 @@ class MusicNetwork {
                 this.ctx.stroke();
                 this.ctx.globalAlpha = 1;
 
-                // label - offset vertically to avoid overlap; use different color for non-artist nodes
+                // label - offset vertically to avoid overlap; use muted color derived from node color
                 this.ctx.font = '11px Courier New, monospace';
                 this.ctx.textAlign = 'center';
-                if (node.type === 'artist') this.ctx.fillStyle = '#00ff00';
-                else if (node.type === 'location') this.ctx.fillStyle = '#ff88d0';
-                else if (node.type === 'genre') this.ctx.fillStyle = '#88bfff';
-                else this.ctx.fillStyle = '#ffff88';
+                this.ctx.fillStyle = this.mutedLabelColor[node.type] || '#cccccc';
 
                 // Split long labels and clamp length
                 const label = String(node.label || '').slice(0, 28);
@@ -902,11 +928,8 @@ class MusicNetwork {
                 this.ctx.fillStyle = 'rgba(0,0,0,0.5)';
                 this.ctx.fillRect(labelX - metrics.width / 2 - pad/2, labelY - 11, metrics.width + pad, 14);
 
-                // draw text on top
-                if (node.type === 'artist') this.ctx.fillStyle = '#00ff00';
-                else if (node.type === 'location') this.ctx.fillStyle = '#ffb0d6';
-                else if (node.type === 'genre') this.ctx.fillStyle = '#bcdcff';
-                else this.ctx.fillStyle = '#fff7b0';
+                // draw text on top using same muted color
+                this.ctx.fillStyle = this.mutedLabelColor[node.type] || '#cccccc';
                 this.ctx.fillText(label, labelX, labelY);
             });
         }
