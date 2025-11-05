@@ -402,10 +402,19 @@ class MusicNetwork {
     // tuning parameters (read from UI)
     const area = width * height;
     const k = Math.sqrt(area / visibleNodes.length) * 0.6; // target distance (smaller => more condensed)
-    const repulsionFactor = this.tuning.repulsion; // repulsion
-    const attractionBase = this.tuning.attraction; // attraction multiplier
+    // base tuning values
+    let repulsionFactor = this.tuning.repulsion; // repulsion
+    let attractionBase = this.tuning.attraction; // attraction multiplier
     const gravityBase = isMobile ? this.tuning.gravity * 0.5 : this.tuning.gravity; // gentle pull to center (reduced on mobile)
-    const minDist = isMobile ? Math.max(24, Math.round(this.tuning.minDistance * 0.75)) : this.tuning.minDistance; // minimum readable distance
+    // minimum readable distance; increase on mobile for better readability
+    const baseMinDist = this.tuning.minDistance;
+    const minDist = isMobile ? Math.max(40, Math.round(baseMinDist * 1.4)) : baseMinDist;
+
+    // Mobile-specific adjustments: prefer more spacing and gentler attraction
+    if (isMobile) {
+        repulsionFactor *= 1.25;    // slightly stronger repulsion on mobile
+        attractionBase *= 0.85;     // reduce attraction so nodes don't clump
+    }
 
         // Precompute connections as object refs for speed
         const conns = this.connectionRefs.filter(cr => cr.from && cr.to && this.visibleTypes[cr.from.type] && this.visibleTypes[cr.to.type]);
@@ -496,8 +505,9 @@ class MusicNetwork {
             });
         }
 
-        // final readable spacing enforcement
-        for (let pass = 0; pass < 4; pass++) {
+    // final readable spacing enforcement (more passes on mobile)
+    const spacingPasses = isMobile ? 6 : 4;
+    for (let pass = 0; pass < spacingPasses; pass++) {
             for (let i = 0; i < visibleNodes.length; i++) {
                 const a = visibleNodes[i];
                 for (let j = i + 1; j < visibleNodes.length; j++) {
@@ -518,8 +528,8 @@ class MusicNetwork {
             }
         }
 
-        // clamp to padding and fit
-        const padding = isMobile ? 30 : 40;
+    // clamp to padding and fit (larger padding on mobile)
+    const padding = isMobile ? 60 : 40;
         visibleNodes.forEach(n => {
             n.x = Math.max(padding, Math.min(width - padding, n.x));
             n.y = Math.max(padding, Math.min(height - padding, n.y));
@@ -546,25 +556,30 @@ class MusicNetwork {
     setupCanvas() {
         const container = document.getElementById('graph-container');
         const rect = container.getBoundingClientRect();
-        
-        // On mobile, ensure we use the full available height
+        // Determine sizes; ensure the graph container uses the available viewport height
         const isMobile = window.innerWidth <= 768;
         let canvasWidth = rect.width;
         let canvasHeight = rect.height;
-        
+
+        // Calculate header and bottom reserved areas (if present)
+        const header = document.querySelector('header');
+        const bottomInfo = document.getElementById('bottom-info');
+        const headerHeight = header ? header.getBoundingClientRect().height : 0;
+        const bottomHeight = bottomInfo ? bottomInfo.getBoundingClientRect().height : 40;
+
+        // Prefer using the full viewport height minus header/bottom bars so canvas reaches the green line
+        const viewportAvailable = Math.max(200, window.innerHeight - headerHeight - bottomHeight - 4);
+        // Use the larger of the container's computed rect height and the viewport available height
+        canvasHeight = Math.max(rect.height, viewportAvailable);
+
+        // On mobile we still explicitly set the container height to avoid layout collapses
         if (isMobile) {
-            // Calculate available height manually for mobile
-            const header = document.querySelector('header');
-            const bottomInfo = document.getElementById('bottom-info');
-            const headerHeight = header ? header.getBoundingClientRect().height : 0;
-            const bottomHeight = bottomInfo ? bottomInfo.getBoundingClientRect().height : 40;
-            
-            canvasHeight = window.innerHeight - headerHeight - bottomHeight;
-            
-            // Set the container height explicitly
             container.style.height = canvasHeight + 'px';
+        } else {
+            // also ensure desktop container expands if it was constrained by CSS
+            if (rect.height < viewportAvailable) container.style.height = canvasHeight + 'px';
         }
-        
+
         // Set canvas size
         this.canvas.width = canvasWidth;
         this.canvas.height = canvasHeight;
