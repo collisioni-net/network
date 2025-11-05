@@ -98,6 +98,17 @@ main {
     flex: 1;
 }
 
+/* Ensure touch gestures are handled by JS and allow panning/zooming on mobile */
+#network-canvas {
+    touch-action: none; /* allow handling pinch/pan in JS */
+    -ms-touch-action: none;
+}
+
+/* Allow canvas drawing to overflow horizontally on mobile when zoomed in */
+#graph-container {
+    overflow-x: visible;
+}
+
 /* Controls */
 #controls {
     position: absolute;
