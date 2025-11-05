@@ -1032,7 +1032,11 @@ class MusicNetwork {
                 if (location1) locations.add(location1);
                 if (location2) locations.add(location2);
                 if (genre) genres.add(genre);
-                if (collective) collectives.add(collective);
+                // allow multiple collectives separated by commas or semicolons
+                if (collective) {
+                    const parts = collective.split(/[;,]+/).map(s => s.trim()).filter(Boolean);
+                    parts.forEach(p => collectives.add(p));
+                }
             } else {
                 console.log('Skipping artist - no valid name found:', artist);
             }
@@ -1137,6 +1141,7 @@ class MusicNetwork {
                 const location2 = artist.location2 || artist['Location 2'] || artist['Location2'] || '';
                 const genre = artist.genre || artist.Genre || '';
                 const collective = artist.collective || artist.Collective || '';
+                const collectiveList = (collective || '').toString().split(/[;,]+/).map(s => s.trim()).filter(Boolean);
                 
                 // Connect to locations
                 this.nodes.forEach(locationNode => {
@@ -1162,16 +1167,19 @@ class MusicNetwork {
                     }
                 });
                 
-                // Connect to collectives
-                this.nodes.forEach(collectiveNode => {
-                    if (collectiveNode.type === 'collective' && collectiveNode.label === collective.trim()) {
-                        this.connections.push({
-                            from: node.id,
-                            to: collectiveNode.id,
-                            type: 'collective'
-                        });
-                    }
-                });
+                // Connect to collectives (support multiple collectives per artist)
+                if (collectiveList.length > 0) {
+                    this.nodes.forEach(collectiveNode => {
+                        if (collectiveNode.type !== 'collective') return;
+                        if (collectiveList.includes(collectiveNode.label)) {
+                            this.connections.push({
+                                from: node.id,
+                                to: collectiveNode.id,
+                                type: 'collective'
+                            });
+                        }
+                    });
+                }
             }
         });
         
@@ -1599,10 +1607,12 @@ class MusicNetwork {
                 const genre = (art.genre || art.Genre || '').toString().trim().toLowerCase();
                 const loc1 = (art.location || art.Location || '').toString().trim().toLowerCase();
                 const loc2 = (art.location2 || art['Location 2'] || art.location2 || '').toString().trim().toLowerCase();
-                const collective = (art.collective || art.Collective || '').toString().trim().toLowerCase();
+                const collectiveRaw = (art.collective || art.Collective || '').toString().trim();
+                const collective = collectiveRaw.toLowerCase();
+                const collectiveParts = collectiveRaw.split(/[;,]+/).map(s => s.trim().toLowerCase()).filter(Boolean);
                 const labelLow = label.toString().trim().toLowerCase();
                 if (type === 'genre') return genre === labelLow;
-                if (type === 'collective') return collective === labelLow;
+                if (type === 'collective') return collective === labelLow || collectiveParts.includes(labelLow);
                 return loc1 === labelLow || loc2 === labelLow;
             });
         }
