@@ -57,6 +57,10 @@ class MusicNetwork {
             iterations: 270         // layout iterations when running
         };
 
+    // Multiplier applied to the automatic fit/initial view to allow a zoomed-in experience
+    // Set to 4 to make the graph appear 4x larger by default (user requested)
+    this.initialZoomMultiplier = 4;
+
         // internal debounce timer used when sliders auto-run a short layout
         this._tuningDebounceTimer = null;
 
@@ -401,7 +405,9 @@ class MusicNetwork {
 
     // tuning parameters (read from UI)
     const area = width * height;
-    const k = Math.sqrt(area / visibleNodes.length) * 0.6; // target distance (smaller => more condensed)
+    // target distance (smaller => more condensed). On mobile use a larger multiplier so nodes spread out.
+    const baseKMultiplier = isMobile ? 1.1 : 0.6;
+    const k = Math.sqrt(area / visibleNodes.length) * baseKMultiplier;
     // base tuning values
     let repulsionFactor = this.tuning.repulsion; // repulsion
     let attractionBase = this.tuning.attraction; // attraction multiplier
@@ -412,8 +418,8 @@ class MusicNetwork {
 
     // Mobile-specific adjustments: prefer more spacing and gentler attraction
     if (isMobile) {
-        repulsionFactor *= 1.25;    // slightly stronger repulsion on mobile
-        attractionBase *= 0.85;     // reduce attraction so nodes don't clump
+        repulsionFactor *= 1.6;    // noticeably stronger repulsion on mobile to spread nodes
+        attractionBase *= 0.8;     // reduce attraction so nodes don't clump
     }
 
         // Precompute connections as object refs for speed
@@ -499,14 +505,22 @@ class MusicNetwork {
                 n.x += dx;
                 n.y += dy;
 
-                // small damping to avoid oscillation
-                n.x = Math.max(10, Math.min(width - 10, n.x));
-                n.y = Math.max(10, Math.min(height - 10, n.y));
+                // small damping to avoid oscillation; on mobile allow nodes to go beyond viewport
+                if (!isMobile) {
+                    n.x = Math.max(10, Math.min(width - 10, n.x));
+                    n.y = Math.max(10, Math.min(height - 10, n.y));
+                } else {
+                    // allow a reasonable overflow margin so the graph can extend beyond the visible area
+                    const horizMargin = Math.max(200, Math.round(width * 0.4));
+                    const vertMargin = Math.max(100, Math.round(height * 0.25));
+                    n.x = Math.max(-horizMargin, Math.min(width + horizMargin, n.x));
+                    n.y = Math.max(-vertMargin, Math.min(height + vertMargin, n.y));
+                }
             });
         }
 
     // final readable spacing enforcement (more passes on mobile)
-    const spacingPasses = isMobile ? 6 : 4;
+    const spacingPasses = isMobile ? 8 : 4;
     for (let pass = 0; pass < spacingPasses; pass++) {
             for (let i = 0; i < visibleNodes.length; i++) {
                 const a = visibleNodes[i];
@@ -528,12 +542,14 @@ class MusicNetwork {
             }
         }
 
-    // clamp to padding and fit (larger padding on mobile)
-    const padding = isMobile ? 60 : 40;
+    // clamp to padding and fit (skip strict clamping on mobile so visualization can overflow)
+    const padding = isMobile ? 0 : 40;
+    if (!isMobile) {
         visibleNodes.forEach(n => {
             n.x = Math.max(padding, Math.min(width - padding, n.x));
             n.y = Math.max(padding, Math.min(height - padding, n.y));
         });
+    }
 
         console.log('Layout complete (controlled force-directed)');
         this.fitToScreen();
@@ -1234,9 +1250,14 @@ class MusicNetwork {
         const centerX = (bounds.minX + bounds.maxX) / 2;
         const centerY = (bounds.minY + bounds.maxY) / 2;
         
-        this.offsetX = containerRect.width / 2 - centerX;
-        this.offsetY = containerRect.height / 2 - centerY;
-        this.scale = 1;
+    const isMobile = window.innerWidth <= 768;
+    // On mobile, start noticeably zoomed in so text is more readable and users can pan around
+    const mobileScale = 2.0;
+    this.scale = isMobile ? mobileScale : 1;
+
+    // compute offsets so the graph center is visible in the canvas center
+    this.offsetX = containerRect.width / 2 - centerX * this.scale;
+    this.offsetY = containerRect.height / 2 - centerY * this.scale;
         
         console.log('Centered view:', { 
             centerX, centerY, 
@@ -1272,6 +1293,15 @@ class MusicNetwork {
             const scaleY = availableHeight / graphHeight;
             scale = Math.min(scaleX, scaleY, 1.2); // cap max scale at 1.2 to avoid over-zooming small graphs
             scale = Math.max(scale, 0.3); // ensure minimum scale so graph doesn't get too tiny
+        }
+
+        // Apply user's preferred initial zoom multiplier (e.g., 4x) but only on mobile
+        const isMobile = window.innerWidth <= 768;
+        const multiplier = (isMobile && this.initialZoomMultiplier) ? this.initialZoomMultiplier : 1;
+        if (multiplier && multiplier > 1) {
+            scale = scale * multiplier;
+            // hard cap to avoid insane zooms
+            scale = Math.min(scale, 8);
         }
         
         // compute center of graph in original coords
