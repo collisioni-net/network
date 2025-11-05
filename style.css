@@ -260,8 +260,20 @@ main {
     word-break: break-all;
 }
 
+#artist-url {
+    color: #0080ff;
+    text-decoration: underline;
+    word-break: break-all;
+    transition: all 0.12s ease;
+    display: inline-block; /* allow background to show consistently */
+    padding: 2px 4px;
+    border-radius: 3px;
+}
+
 #artist-url:hover {
-    color: #00ff00;
+    background: #00ff00;
+    color: #000;
+    text-decoration: none;
 }
 
 #artist-info-text {
@@ -342,6 +354,33 @@ main {
 #about-us-btn:hover {
     background: #00ff00;
     color: #000;
+}
+
+/* Reuse the about-us hover color for overview/listing pages showing multiple artists.
+   This covers common selectors for artist lists/cards/rows/links. Adjust selectors
+   if your overview markup uses different class names. */
+.overview a:hover,
+.overview .artist-item:hover,
+.artist-list a:hover,
+.artist-card:hover,
+.artist-entry:hover,
+.artist-row:hover,
+.artist-link:hover,
+.overview button:hover {
+    background: #00ff00;
+    color: #000;
+    transition: all 0.15s;
+}
+
+/* Apply same invert hover to group artist buttons used in lists/overviews.
+   We use !important to override inline 'background' styles if present. */
+.group-artist-btn {
+    transition: all 0.12s ease;
+}
+.group-artist-btn:hover {
+    background: #00ff00 !important;
+    color: #000 !important;
+    text-decoration: none;
 }
 
 /* Animations */
