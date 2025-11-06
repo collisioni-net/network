@@ -15,25 +15,42 @@
                     <span class="title-full">Collisioni Electronic Music Network</span>
                     <span class="title-short">collisioni</span>
                 </h1>
-                <p>an interactive map of artists in south tyrol</p>
+                <p>
+                    <span class="subtitle-desktop">an interactive map of electronic music in south tyrol</span>
+                    <span class="subtitle-mobile">interactive map of electronic music in south tyrol</span>
+                </p>
             </div>
         </div>
     </header>
     
     <main>
-        <div id="loading">loading artist data...</div>
+    <div id="loading">loading producer data...</div>
         <div id="graph-container">
             <canvas id="network-canvas"></canvas>
         </div>
         
         <div id="controls">
-            <button id="reset-view">reset view</button>
-            <div id="legend">
-                <div><span class="artist-dot"></span> artists</div>
-                <div><span class="location-dot"></span> locations</div>
-                <div><span class="genre-dot"></span> genres</div>
-                <div><span class="collective-dot"></span> collectives</div>
+            <div class="control-buttons legend-toggle-row">
+                <button id="legend-toggle" class="control-btn" type="button">filters</button>
             </div>
+            <div id="legend">
+                <div data-type="artist"><span class="artist-dot"></span> producers</div>
+                <div data-type="dj"><span class="dj-dot"></span> djs</div>
+                <div data-type="location"><span class="location-dot"></span> locations</div>
+                <div data-type="genre"><span class="genre-dot"></span> genres</div>
+                <div data-type="collective"><span class="collective-dot"></span> collectives</div>
+            </div>
+            <div class="search-wrapper">
+                <input type="search" id="node-search" placeholder="search..." autocomplete="off">
+            </div>
+            <div class="control-buttons bottom-row">
+                <button id="toggle-view" class="control-btn">list view</button>
+            </div>
+        </div>
+
+        <div id="list-container" class="hidden">
+            <div id="list-empty" class="list-empty hidden">no nodes to display</div>
+            <div id="node-list"></div>
         </div>
     </main>
     

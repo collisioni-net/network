@@ -21,6 +21,7 @@ class MusicNetwork {
         // Node types and colors
         this.nodeTypes = {
             artist: { color: '#00ff00', radius: 8 },
+            dj: { color: '#ff6f00', radius: 8 },
             location: { color: '#ff0080', radius: 5 },
             genre: { color: '#0080ff', radius: 6 },
             collective: { color: '#ffff00', radius: 7 }
@@ -42,18 +43,47 @@ class MusicNetwork {
         // Visibility toggles for legend filtering
         this.visibleTypes = {
             artist: true,
+            dj: true,
             location: true,
             genre: true,
             collective: true
         };
 
+        // View & search state
+        this.searchTerm = '';
+        this.filteredNodeIds = null;
+        this.activeView = 'network';
+
+        // Cached DOM references
+        this.networkContainer = null;
+        this.listContainer = null;
+        this.nodeListElement = null;
+        this.listEmptyState = null;
+        this.viewToggleButton = null;
+        this.searchInput = null;
+        this.legendItems = new Map();
+        this.explainerTextElement = null;
+        this.explainerMessages = {
+            network: '',
+            list: 'see a list of all included nodes. search or toggle categories to filter list.'
+        };
+        this.controlsBottomRow = null;
+        this.aboutButton = null;
+        this.aboutButtonHome = null;
+        this.legendToggleButton = null;
+        this.legendCollapsed = false;
+        this.mobileControlsActive = false;
+    this._handleResize = null;
+    this._handleViewportResize = null;
+    this._resizeDebounce = null;
+
         // Tuning parameters (exposed to UI sliders)
         this.tuning = {
-            repulsion: 0.16,        // repulsion factor (lower = less push)
-            attraction: 0.95,       // attraction base (higher = nodes pulled together more)
+            repulsion: 0.22,        // repulsion factor (lower = less push)
+            attraction: 0.9,        // attraction base (higher = nodes pulled together more)
             gravity: 0.5,           // gravity toward center (screenshot default)
-            sameTypeRepel: 0.25,    // extra repulsion for same-type nodes (artists)
-            minDistance: 46,        // minimum readable distance (px)
+            sameTypeRepel: 0.35,    // extra repulsion for same-type nodes (producers/djs)
+            minDistance: 54,        // minimum readable distance (px)
             iterations: 270         // layout iterations when running
         };
 
@@ -64,7 +94,7 @@ class MusicNetwork {
         // internal debounce timer used when sliders auto-run a short layout
         this._tuningDebounceTimer = null;
 
-    // auto-centering while simulation runs (disabled when user interacts)
+    // auto-centering while layout runs (disabled when user interacts)
     this.autoCentering = false; // enabled briefly after load or reset via ticks
     this.autoCenterTicks = 0;   // number of ticks to auto-center for
         
@@ -133,316 +163,70 @@ class MusicNetwork {
         }
     }
 
-    _initSimulationOnceD3Loaded() {
-        try {
-            // Build link objects expected by d3
-            const links = this.connections.map(c => ({ source: c.from, target: c.to, type: c.type }));
-
-            // Map nodes by id for d3
-            const nodes = this.nodes.map(n => Object.assign({}, n));
-
-            // compute node degrees (number of links) so we can bias centering
-            // force toward isolated nodes only
-            const degree = {};
-            links.forEach(l => {
-                const s = l.source;
-                const t = l.target;
-                degree[s] = (degree[s] || 0) + 1;
-                degree[t] = (degree[t] || 0) + 1;
-            });
-
-            // Adapt force parameters to graph size — larger graphs need stronger link distances and tuned charge
-            const nodeCount = nodes.length;
-            const scaleFactor = Math.min(3, Math.max(1, nodeCount / 150)); // for ~400 nodes scaleFactor~2.66
-
-            // base link distances per type; vary significantly for organic feel
-            // Start with much wider spacing for initial readability, will settle closer naturally
-            const baseDistances = {
-                location: window.innerWidth > 1024 ? 200 : 100,
-                genre: window.innerWidth > 1024 ? 220 : 110,
-                collective: window.innerWidth > 1024 ? 190 : 95,
-                default: window.innerWidth > 1024 ? 210 : 105
-            };
-
-            // More padding initially for better readability, will compress after settling
-            const collisionPadding = 12 + Math.round(scaleFactor * 5);
-            // Reduced link strength so artists don't cluster too tightly via shared connections
-            const linkStrength = Math.max(0.1, 0.3 / scaleFactor);
-            // Stronger initial artist repulsion for readability, will soften after settling
-            const perTypeCharge = {
-                artist: this.legacyStyle ? -35 * scaleFactor : -45 * scaleFactor,
-                location: this.legacyStyle ? -45 * scaleFactor : -55 * scaleFactor,
-                genre: this.legacyStyle ? -50 * scaleFactor : -60 * scaleFactor,
-                collective: this.legacyStyle ? -35 * scaleFactor : -45 * scaleFactor
-            };
-            // Highly variable link distances based on degree create natural clustering
-            const linkTypeMultiplier = { location: 0.8, genre: 0.85, collective: 0.75, default: 1 };
-            // Moderate collision enforcement for organic packing
-            const collisionTypeMultiplier = { artist: 0.9, location: 1.1, genre: 1.2, collective: 1.0 };
-
-            // Create simulation with optimized forces
-            this.simulation = d3.forceSimulation(nodes)
-                .force('link', d3.forceLink(links).id(d => d.id).distance(link => {
-                    const t = link.type || 'default';
-                    const mult = linkTypeMultiplier[t] || linkTypeMultiplier.default;
-                    // Strong degree-based variation: highly connected nodes form tight clusters
-                    const srcDeg = degree[link.source.id || link.source] || 0;
-                    const tgtDeg = degree[link.target.id || link.target] || 0;
-                    const avgDeg = (srcDeg + tgtDeg) / 2;
-                    
-                    // More aggressive degree scaling for organic clustering
-                    // High-degree nodes: much shorter links (0.4x base for initial spread)
-                    // Low-degree nodes: longer links (1.0x base)
-                    const degreeScale = Math.max(0.4, 1 - (avgDeg / 12));
-                    
-                    // Add slight randomness for organic feel (±10%)
-                    const randomVariation = 0.9 + Math.random() * 0.2;
-                    
-                    return (baseDistances[t] || baseDistances.default) * scaleFactor * mult * degreeScale * randomVariation;
-                }).strength(linkStrength))
-                .force('charge', d3.forceManyBody().strength(d => perTypeCharge[d.type] || (perTypeCharge.default || -8)))
-                .force('center', d3.forceCenter(this.canvas.width / 2, this.canvas.height / 2))
-                .force('forceX', d3.forceX(this.canvas.width / 2).strength(d => {
-                    const deg = degree[d.id] || 0;
-                    // High-degree nodes pulled to center, low-degree drift to periphery naturally
-                    return deg <= 1 ? 0.02 : Math.min(0.12, 0.02 + deg * 0.01);
-                }))
-                .force('forceY', d3.forceY(this.canvas.height / 2).strength(d => {
-                    const deg = degree[d.id] || 0;
-                    // High-degree nodes pulled to center, low-degree drift to periphery naturally
-                    return deg <= 1 ? 0.02 : Math.min(0.12, 0.02 + deg * 0.01);
-                }))
-                .force('collision', d3.forceCollide().radius(d => {
-                    const mult = collisionTypeMultiplier[d.type] || 1;
-                    return this.nodeTypes[d.type].radius + Math.round(collisionPadding * mult);
-                }).strength(0.8).iterations(2)) // Stronger collision initially for better spacing
-                .alphaDecay(0.028) // Slightly faster decay to reach readable state
-                .alphaMin(0.001)
-                .on('tick', () => {
-                    // copy positions back efficiently using map
-                    for (let i = 0; i < nodes.length; i++) {
-                        const nd = nodes[i];
-                        const local = this.nodeMap.get(nd.id);
-                        if (local) {
-                            local.x = nd.x;
-                            local.y = nd.y;
-                            local.vx = nd.vx;
-                            local.vy = nd.vy;
-                        }
-                    }
-
-                    // Auto-center only for a short countdown after load/reset
-                    if (this.autoCenterTicks > 0) {
-                        const bounds = this.getBounds();
-                        const containerRect = this.canvas.getBoundingClientRect();
-                        const centerX = (bounds.minX + bounds.maxX) / 2;
-                        const centerY = (bounds.minY + bounds.maxY) / 2;
-                        this.offsetX = containerRect.width / 2 - centerX;
-                        this.offsetY = containerRect.height / 2 - centerY;
-                        this.autoCenterTicks -= 1;
-                        this.autoCentering = this.autoCenterTicks > 0;
-                    }
-
-                    // Clamp nodes to remain inside visible canvas area with padding
-                    const rect = this.canvas.getBoundingClientRect();
-                    const paddingClamp = 30; // keep nodes this far from edges (slightly reduced)
-                    for (let i = 0; i < nodes.length; i++) {
-                        const nd = nodes[i];
-                        nd.x = Math.max(paddingClamp, Math.min(rect.width - paddingClamp, nd.x));
-                        nd.y = Math.max(paddingClamp, Math.min(rect.height - paddingClamp, nd.y));
-                    }
-
-                    // render at most every few ticks for performance on large graphs
-                    if (!this._lastRenderTick || (Date.now() - this._lastRenderTick) > 30) {
-                        this.render();
-                        this._lastRenderTick = Date.now();
-                    }
-                });
-
-            // when simulation finishes settling, only center if this was the
-            // initial auto-centering run to avoid jumping after user interaction
-            const initialAutoCenter = this.autoCenterTicks > 0;
-            this.simulation.on('end', () => {
-                try {
-                    if (initialAutoCenter) {
-                        this.fitToScreen();
-                        this.render();
-                    }
-                    // After the simulation settles, drastically reduce repulsion and
-                    // centering so users can rearrange nodes freely without strong forces.
-                    this._softenSimulationForInteraction();
-                } catch (e) {
-                    // ignore
-                }
-            });
-
-            // Attach drag handlers that interact with the simulation
-            this._d3nodes = nodes;
-            // fast lookup for d3 nodes by id to avoid repeated array.find calls
-            this._d3nodeMap = new Map(this._d3nodes.map(n => [n.id, n]));
-            this._d3links = links;
-
-            // Start with higher alpha for good initial spread
-            this.simulation.alpha(1.0).restart();
-            // enable auto-centering briefly after loading
-            this.autoCenterTicks = 80; // number of ticks to auto-center for (tuneable)
-            this.autoCentering = true;
-
-            // After d3 finishes its initial settling (or shortly after start),
-            // re-apply our tuned, controlled layout so the loaded view matches
-            // the visual result you get when clicking "Run Layout".
-            setTimeout(() => {
-                try {
-                    // run the controlled layout which will stop the simulation
-                    this.runLayout(this.tuning.iterations);
-                    this.render();
-                } catch (e) {
-                    console.warn('Post-d3 initial layout re-run failed:', e);
-                }
-            }, 600);
-
-            // ensure nodeMap exists so tick copy works
-            if (!this.nodeMap || this.nodeMap.size === 0) this.buildIndexes();
-        } catch (err) {
-            console.error('Error initializing d3 simulation:', err);
-            // fallback to previous runLayout behavior
-            this.runLayout();
-        }
-    }
-
-    // Soften simulation so manual user interaction persists: lower charge, increased collision softness
-    _softenSimulationForInteraction() {
-        if (!this.simulation) return;
-        try {
-            // Reduce forces after initial layout settles, allowing natural clustering
-            // Set charge to gentle repulsion so nodes can be closer together
-            if (this.simulation.force('charge')) this.simulation.force('charge').strength(() => -1.5);
-            // Disable strong centering/anchoring influences so nodes stay where users place them.
-            // IMPORTANT: do NOT set the center to (0,0) — that pulls everything to the corner.
-            // Instead, remove the center/forceX/forceY forces so they no longer influence positions.
-            try { if (typeof d3 !== 'undefined') this.simulation.force('center', null); } catch (e) {}
-            try { if (typeof d3 !== 'undefined') this.simulation.force('forceX', null); } catch (e) {}
-            try { if (typeof d3 !== 'undefined') this.simulation.force('forceY', null); } catch (e) {}
-            // Soften collisions a lot to make overlapping and tight packing possible through manual moves
-            if (this.simulation.force('collision')) this.simulation.force('collision').radius(d => this.nodeTypes[d.type].radius + 4).iterations(1);
-            // Make simulation passive: no continuous alpha target, but allow tiny nudges
-            this.simulation.alphaTarget(0);
-            // apply changes gently
-            this.simulation.restart();
-        } catch (e) {
-            // ignore
-        }
-    }
-
-    // Harden simulation when user clicks Reset or when we want the layout to re-run
-    _hardenSimulationForLayout() {
-        if (!this.simulation) return;
-        try {
-            const scale = Math.min(3, Math.max(1, this.nodes.length / 150));
-            const charge = this.legacyStyle ? -12 * scale : -26 * scale;
-            if (this.simulation.force('charge')) this.simulation.force('charge').strength(charge);
-            // Restore centering and directional forces so layout converges
-            if (typeof d3 !== 'undefined') {
-                this.simulation.force('center', d3.forceCenter(this.canvas.width / 2, this.canvas.height / 2));
-                this.simulation.force('forceX', d3.forceX(this.canvas.width / 2).strength(0.02));
-                this.simulation.force('forceY', d3.forceY(this.canvas.height / 2).strength(0.02));
-            }
-            if (this.simulation.force('collision')) this.simulation.force('collision').radius(d => this.nodeTypes[d.type].radius + 8 + Math.round(scale * 6)).iterations(2);
-            // nudge alpha to let layout run again with stronger forces
-            this.simulation.alpha(0.6).restart();
-        } catch (e) {
-            // ignore
-        }
-    }
-
     // Improved, controlled force-directed layout (one-off)
-    // Goals: reduce explosive repulsion, limit excessive attraction between nodes of same type (artists),
+    // Goals: reduce explosive repulsion, limit excessive attraction between nodes of same type (producers/djs),
     // keep layout readable and let users move nodes freely after layout finishes.
     runLayout(iterations = 180) {
         if (!this.nodes || this.nodes.length === 0) return;
-
-        // If a d3 simulation is active, stop it so it doesn't overwrite our manual layout.
-        if (this.simulation) {
-            try {
-                console.log('Stopping active d3 simulation to apply controlled layout');
-                this.simulation.stop();
-            } catch (e) {
-                console.warn('Failed to stop d3 simulation cleanly:', e);
-            }
-            this.simulation = null;
-            this._d3nodes = null;
-            this._d3nodeMap = null;
-            this._d3links = null;
-        }
 
         const isMobile = window.innerWidth <= 768;
         const canvasRect = this.canvas.getBoundingClientRect();
         const width = canvasRect.width;
         const height = canvasRect.height;
 
-        // Build quick lookup and visible node list
         this.buildIndexes();
-        const visibleNodes = this.nodes.filter(n => this.visibleTypes[n.type]);
-        if (visibleNodes.length === 0) return;
+        const layoutNodes = this.nodes.filter((n) => this.isNodeVisible(n) || (!this.searchTerm && n.type === 'dj'));
+        if (layoutNodes.length === 0) return;
+        const layoutNodeIds = new Set(layoutNodes.map((n) => n.id));
 
-        // Compute degree map (centrality)
         const degree = new Map();
-        visibleNodes.forEach(n => degree.set(n.id, 0));
-        this.connections.forEach(c => {
+        layoutNodes.forEach((n) => degree.set(n.id, 0));
+        this.connections.forEach((c) => {
             if (degree.has(c.from)) degree.set(c.from, degree.get(c.from) + 1);
             if (degree.has(c.to)) degree.set(c.to, degree.get(c.to) + 1);
         });
 
-        // Initialize positions if missing (small jitter around current position)
-        visibleNodes.forEach(n => {
+        layoutNodes.forEach((n) => {
             if (typeof n.x !== 'number' || typeof n.y !== 'number') {
                 n.x = Math.random() * width;
                 n.y = Math.random() * height;
             }
-            n.x += (Math.random() - 0.5) * 2; // tiny jitter
+            n.x += (Math.random() - 0.5) * 2;
             n.y += (Math.random() - 0.5) * 2;
         });
 
-    // tuning parameters (read from UI)
-    const area = width * height;
-    // target distance (smaller => more condensed). On mobile use a larger multiplier so nodes spread out.
-    const baseKMultiplier = isMobile ? 1.1 : 0.6;
-    const k = Math.sqrt(area / visibleNodes.length) * baseKMultiplier;
-    // base tuning values
-    let repulsionFactor = this.tuning.repulsion; // repulsion
-    let attractionBase = this.tuning.attraction; // attraction multiplier
-    const gravityBase = isMobile ? this.tuning.gravity * 0.5 : this.tuning.gravity; // gentle pull to center (reduced on mobile)
-    // minimum readable distance; increase on mobile for better readability
-    const baseMinDist = this.tuning.minDistance;
-    const minDist = isMobile ? Math.max(40, Math.round(baseMinDist * 1.4)) : baseMinDist;
+        const area = width * height;
+        const baseKMultiplier = isMobile ? 1.15 : 0.65;
+        const k = Math.sqrt(area / Math.max(1, layoutNodes.length)) * baseKMultiplier;
 
-    // Mobile-specific adjustments: prefer more spacing and gentler attraction
-    if (isMobile) {
-        repulsionFactor *= 1.6;    // noticeably stronger repulsion on mobile to spread nodes
-        attractionBase *= 0.8;     // reduce attraction so nodes don't clump
-    }
+        let repulsionFactor = this.tuning.repulsion;
+        let attractionBase = this.tuning.attraction;
+        const gravityBase = isMobile ? this.tuning.gravity * 0.5 : this.tuning.gravity;
+        const baseMinDist = this.tuning.minDistance;
+        const minDist = isMobile ? Math.max(45, Math.round(baseMinDist * 1.4)) : baseMinDist;
 
-        // Precompute connections as object refs for speed
-        const conns = this.connectionRefs.filter(cr => cr.from && cr.to && this.visibleTypes[cr.from.type] && this.visibleTypes[cr.to.type]);
+        if (isMobile) {
+            repulsionFactor *= 1.6;
+            attractionBase *= 0.8;
+        }
+
+        const conns = this.connectionRefs.filter(
+            (cr) => cr.from && cr.to && layoutNodeIds.has(cr.from.id) && layoutNodeIds.has(cr.to.id)
+        );
 
         for (let iter = 0; iter < iterations; iter++) {
-            // zero forces
             const forces = new Map();
-            visibleNodes.forEach(n => forces.set(n.id, { fx: 0, fy: 0 }));
+            layoutNodes.forEach((n) => forces.set(n.id, { fx: 0, fy: 0 }));
 
-            // repulsive forces (pairwise) - reduced magnitude and quadratic falloff to avoid sudden pushes
-            for (let i = 0; i < visibleNodes.length; i++) {
-                const a = visibleNodes[i];
-                for (let j = i + 1; j < visibleNodes.length; j++) {
-                    const b = visibleNodes[j];
+            for (let i = 0; i < layoutNodes.length; i++) {
+                const a = layoutNodes[i];
+                for (let j = i + 1; j < layoutNodes.length; j++) {
+                    const b = layoutNodes[j];
                     const dx = b.x - a.x;
                     const dy = b.y - a.y;
                     const dist = Math.sqrt(dx * dx + dy * dy) || 0.001;
 
-                    // same-type (artist) gentle extra repulsion to avoid tight artist clumping
-                    const sameTypeBonus = (a.type === 'artist' && b.type === 'artist') ? this.tuning.sameTypeRepel : 0;
-
-                    // Fruchterman-like repulsion but softened
+                    const sameTypeBonus = (a.type === b.type && (a.type === 'artist' || a.type === 'dj')) ? this.tuning.sameTypeRepel : 0;
                     const repulse = repulsionFactor * (k * k) / (dist * (1 + sameTypeBonus));
                     const fx = (dx / dist) * repulse;
                     const fy = (dy / dist) * repulse;
@@ -454,22 +238,18 @@ class MusicNetwork {
                 }
             }
 
-            // attractive forces along connections
-            for (let c of conns) {
+            for (const c of conns) {
                 const a = c.from;
                 const b = c.to;
                 const dx = b.x - a.x;
                 const dy = b.y - a.y;
                 const dist = Math.sqrt(dx * dx + dy * dy) || 0.001;
 
-                // type-aware attraction: keep artist->group links moderately strong, but avoid pulling artists together
                 const type = c.type || 'default';
                 const typeStrength = type === 'location' || type === 'genre' || type === 'collective' ? 0.9 : 0.6;
-                // if both are artists (rare), reduce attraction
-                const bothArtists = (a.type === 'artist' && b.type === 'artist');
+                const bothArtists = ((a.type === 'artist' || a.type === 'dj') && (b.type === 'artist' || b.type === 'dj'));
                 const strength = typeStrength * (bothArtists ? 0.25 : 1) * attractionBase;
 
-                // spring-like attraction (quadratic helps small links remain strong)
                 const attraction = (dist * dist) / k * strength;
                 const fx = (dx / dist) * attraction;
                 const fy = (dy / dist) * attraction;
@@ -480,11 +260,10 @@ class MusicNetwork {
                 forces.get(b.id).fy -= fy;
             }
 
-            // gravity toward center weighted by centrality (but kept gentle)
             const centerX = width / 2;
             const centerY = height / 2;
             const maxDegree = Math.max(1, ...Array.from(degree.values()));
-            visibleNodes.forEach(n => {
+            layoutNodes.forEach((n) => {
                 const deg = degree.get(n.id) || 0;
                 const centrality = deg / maxDegree;
                 const g = gravityBase * (0.5 + centrality * 0.8);
@@ -495,9 +274,8 @@ class MusicNetwork {
                 forces.get(n.id).fy += (dy / dist) * g * dist;
             });
 
-            // integrate forces with temperature limit for stability
             const temp = Math.max(1, (1 - iter / iterations) * Math.min(width, height) * 0.08);
-            visibleNodes.forEach(n => {
+            layoutNodes.forEach((n) => {
                 const f = forces.get(n.id);
                 const fmag = Math.sqrt(f.fx * f.fx + f.fy * f.fy) || 0.001;
                 const dx = (f.fx / fmag) * Math.min(fmag, temp);
@@ -505,12 +283,10 @@ class MusicNetwork {
                 n.x += dx;
                 n.y += dy;
 
-                // small damping to avoid oscillation; on mobile allow nodes to go beyond viewport
                 if (!isMobile) {
                     n.x = Math.max(10, Math.min(width - 10, n.x));
                     n.y = Math.max(10, Math.min(height - 10, n.y));
                 } else {
-                    // allow a reasonable overflow margin so the graph can extend beyond the visible area
                     const horizMargin = Math.max(200, Math.round(width * 0.4));
                     const vertMargin = Math.max(100, Math.round(height * 0.25));
                     n.x = Math.max(-horizMargin, Math.min(width + horizMargin, n.x));
@@ -519,13 +295,12 @@ class MusicNetwork {
             });
         }
 
-    // final readable spacing enforcement (more passes on mobile)
-    const spacingPasses = isMobile ? 8 : 4;
-    for (let pass = 0; pass < spacingPasses; pass++) {
-            for (let i = 0; i < visibleNodes.length; i++) {
-                const a = visibleNodes[i];
-                for (let j = i + 1; j < visibleNodes.length; j++) {
-                    const b = visibleNodes[j];
+        const spacingPasses = isMobile ? 8 : 4;
+        for (let pass = 0; pass < spacingPasses; pass++) {
+            for (let i = 0; i < layoutNodes.length; i++) {
+                const a = layoutNodes[i];
+                for (let j = i + 1; j < layoutNodes.length; j++) {
+                    const b = layoutNodes[j];
                     const dx = b.x - a.x;
                     const dy = b.y - a.y;
                     const dist = Math.sqrt(dx * dx + dy * dy) || 0.001;
@@ -542,14 +317,13 @@ class MusicNetwork {
             }
         }
 
-    // clamp to padding and fit (skip strict clamping on mobile so visualization can overflow)
-    const padding = isMobile ? 0 : 40;
-    if (!isMobile) {
-        visibleNodes.forEach(n => {
-            n.x = Math.max(padding, Math.min(width - padding, n.x));
-            n.y = Math.max(padding, Math.min(height - padding, n.y));
-        });
-    }
+        if (!isMobile) {
+            const padding = 40;
+            layoutNodes.forEach((n) => {
+                n.x = Math.max(padding, Math.min(width - padding, n.x));
+                n.y = Math.max(padding, Math.min(height - padding, n.y));
+            });
+        }
 
         console.log('Layout complete (controlled force-directed)');
         this.fitToScreen();
@@ -574,17 +348,26 @@ class MusicNetwork {
         const rect = container.getBoundingClientRect();
         // Determine sizes; ensure the graph container uses the available viewport height
         const isMobile = window.innerWidth <= 768;
+        const viewportHeight = window.visualViewport
+            ? Math.floor(window.visualViewport.height || window.innerHeight)
+            : window.innerHeight;
         let canvasWidth = rect.width;
         let canvasHeight = rect.height;
 
         // Calculate header and bottom reserved areas (if present)
         const header = document.querySelector('header');
         const bottomInfo = document.getElementById('bottom-info');
+        const controls = document.getElementById('controls');
         const headerHeight = header ? header.getBoundingClientRect().height : 0;
         const bottomHeight = bottomInfo ? bottomInfo.getBoundingClientRect().height : 40;
+        const controlsHeight = (controls && (controls.classList.contains('mobile-bottom-controls') || isMobile))
+            ? controls.getBoundingClientRect().height
+            : 0;
+        const effectiveBottom = controlsHeight > 0 ? controlsHeight : bottomHeight;
 
         // Prefer using the full viewport height minus header/bottom bars so canvas reaches the green line
-        const viewportAvailable = Math.max(200, window.innerHeight - headerHeight - bottomHeight - 4);
+        const paddingMargin = isMobile ? 0 : 4;
+    const viewportAvailable = Math.max(200, viewportHeight - headerHeight - effectiveBottom - paddingMargin);
         // Use the larger of the container's computed rect height and the viewport available height
         canvasHeight = Math.max(rect.height, viewportAvailable);
 
@@ -605,21 +388,29 @@ class MusicNetwork {
         console.log('Canvas setup:', { width: canvasWidth, height: canvasHeight, isMobile });
         
         // Resize handler
-        window.addEventListener('resize', () => {
-            setTimeout(() => {
-                this.setupCanvas();
-                // Re-run layout on mobile when orientation changes to fix flat line
-                if (window.innerWidth <= 768) {
-                    this.runLayout(100); // shorter layout run for responsiveness
-                }
-                // update simulation center if present so nodes stay centered
-                if (this.simulation && typeof d3 !== 'undefined') {
-                    this.simulation.force('center', d3.forceCenter(this.canvas.width / 2, this.canvas.height / 2));
-                    this.simulation.alpha(0.2).restart();
-                }
-                this.render();
-            }, 100);
-        });
+        if (!this._handleResize) {
+            this._handleResize = () => {
+                if (this._resizeDebounce) clearTimeout(this._resizeDebounce);
+                this._resizeDebounce = setTimeout(() => {
+                    this.setupCanvas();
+                    if (window.innerWidth <= 768) {
+                        this.runLayout(100);
+                    }
+                    this.render();
+                    this.updateListLayoutSizing();
+                    this.updateMobileControlsLayout();
+                    this._resizeDebounce = null;
+                }, 100);
+            };
+            window.addEventListener('resize', this._handleResize);
+        }
+
+        if (window.visualViewport && !this._handleViewportResize) {
+            this._handleViewportResize = () => {
+                this._handleResize();
+            };
+            window.visualViewport.addEventListener('resize', this._handleViewportResize);
+        }
     }
     
     setupEventListeners() {
@@ -633,20 +424,6 @@ class MusicNetwork {
         this.canvas.addEventListener('touchstart', (e) => this.handleTouchStart(e), { passive: false });
         this.canvas.addEventListener('touchmove', (e) => this.handleTouchMove(e), { passive: false });
         this.canvas.addEventListener('touchend', (e) => this.handleTouchEnd(e));
-        
-        // Reset view button
-        document.getElementById('reset-view').addEventListener('click', () => {
-            // enable auto-centering briefly after reset
-            this.autoCenterTicks = 80;
-            this.autoCentering = true;
-            this.fitToScreen();
-            if (this.simulation && typeof d3 !== 'undefined') {
-                this.simulation.force('center', d3.forceCenter(this.canvas.width / 2, this.canvas.height / 2));
-                // harden forces and re-run layout when user requests reset
-                this._hardenSimulationForLayout();
-            }
-            this.render();
-        });
         
         // Modal close
         document.getElementById('close-modal').addEventListener('click', () => {
@@ -664,34 +441,84 @@ class MusicNetwork {
             this.showAboutModal();
         });
 
+        // Cache DOM references for view/search controls
+        this.networkContainer = document.getElementById('graph-container');
+        this.listContainer = document.getElementById('list-container');
+        this.nodeListElement = document.getElementById('node-list');
+        this.listEmptyState = document.getElementById('list-empty');
+        this.viewToggleButton = document.getElementById('toggle-view');
+        this.searchInput = document.getElementById('node-search');
+        this.explainerTextElement = document.querySelector('.explainer-text');
+        this.controlsBottomRow = document.querySelector('#controls .control-buttons.bottom-row');
+        this.aboutButton = document.getElementById('about-us-btn');
+        if (this.aboutButton && !this.aboutButtonHome) {
+            this.aboutButtonHome = this.aboutButton.parentElement;
+        }
+        this.legendToggleButton = document.getElementById('legend-toggle');
+
+        if (this.explainerTextElement) {
+            const initialText = this.explainerTextElement.textContent.trim();
+            if (!this.explainerMessages.network) {
+                this.explainerMessages.network = initialText;
+            }
+        }
+
+        if (this.viewToggleButton) {
+            this.viewToggleButton.addEventListener('click', () => {
+                const targetView = this.activeView === 'network' ? 'list' : 'network';
+                this.switchView(targetView);
+            });
+        }
+
+        if (this.searchInput) {
+            this.searchInput.addEventListener('input', (e) => {
+                this.searchTerm = (e.target.value || '').trim();
+                this.applySearchFilter();
+                if (this.activeView === 'list') {
+                    this.renderListView();
+                }
+                this.render();
+            });
+        }
+
+        if (this.legendToggleButton) {
+            this.legendToggleButton.addEventListener('click', () => {
+                this.toggleLegend();
+            });
+        }
+
+        this.updateListLayoutSizing();
+        this.updateMobileControlsLayout();
+
         // Legend toggle handlers: click on legend items to show/hide types
         const legend = document.getElementById('legend');
         if (legend) {
-            // legend has 4 child divs in the DOM order: artists, locations, genres, collectives
-            const items = legend.querySelectorAll('div');
-            if (items && items.length >= 4) {
-                const mapping = ['artist', 'location', 'genre', 'collective'];
-                items.forEach((it, idx) => {
-                    it.style.cursor = 'pointer';
-                    it.addEventListener('click', () => {
-                        const type = mapping[idx];
-                        this.visibleTypes[type] = !this.visibleTypes[type];
-                        // visual feedback: toggle opacity
-                        it.style.opacity = this.visibleTypes[type] ? '1' : '0.35';
-                        // If hiding some node types, we may want to hide their nodes & links
-                        // Rebuild connection refs in case visibility affects pruning elsewhere
-                        this.buildIndexes();
-                        this.render();
-                        // nudge simulation to reposition remaining nodes
-                        if (this.simulation) {
-                            // recompute center and restart lightly
-                            this.simulation.force('center', d3.forceCenter(this.canvas.width / 2, this.canvas.height / 2));
-                            this.simulation.alpha(0.3).restart();
-                        }
-                    });
+            const items = legend.querySelectorAll('[data-type]');
+            items.forEach((it) => {
+                const type = it.dataset.type;
+                if (!type) return;
+                if (!this.visibleTypes.hasOwnProperty(type)) {
+                    this.visibleTypes[type] = true;
+                }
+                this.legendItems.set(type, it);
+                it.style.cursor = 'pointer';
+                it.style.opacity = this.visibleTypes[type] ? '1' : '0.35';
+                it.addEventListener('click', () => {
+                    const current = this.visibleTypes[type];
+                    this.visibleTypes[type] = !current;
+                    it.style.opacity = this.visibleTypes[type] ? '1' : '0.35';
+                    this.buildIndexes();
+                    this.applySearchFilter();
+                    if (this.activeView === 'list') {
+                        this.renderListView();
+                    }
+                    this.render();
                 });
-            }
+            });
         }
+
+        // Ensure view state reflects current defaults
+        this.switchView(this.activeView);
     }
 
     // Create a small tuning UI panel with sliders for key force parameters
@@ -820,10 +647,10 @@ class MusicNetwork {
             this.artists = this.parseCSV(csvText);
             
             if (this.artists.length === 0) {
-                throw new Error('No valid artist data found');
+                throw new Error('No valid producer data found');
             }
             
-            console.log('Loaded artists:', this.artists);
+            console.log('Loaded producers:', this.artists);
         } catch (error) {
             console.error('Error loading data from Google Sheets:', error);
             console.log('Using sample data for demonstration...');
@@ -867,7 +694,7 @@ class MusicNetwork {
                     location: 'Brixen',
                     location2: 'Bressanone',
                     url: 'https://klangwerk.studio',
-                    infoText: 'Sound artist exploring the intersection of natural Alpine sounds and electronic manipulation.',
+                    infoText: 'Sound producer exploring the intersection of natural Alpine sounds and electronic manipulation.',
                     collective: 'Digital Alps'
                 },
                 {
@@ -983,7 +810,7 @@ class MusicNetwork {
         const genres = new Set();
         const collectives = new Set();
         
-        console.log('Creating nodes for artists:', this.artists);
+    console.log('Creating nodes for producers:', this.artists);
         
         // Create artist nodes and collect unique locations/genres
         this.artists.forEach((artist, index) => {
@@ -1010,9 +837,13 @@ class MusicNetwork {
                     y = Math.random() * (containerRect.height * 0.7) + containerRect.height * 0.15;
                 }
 
+                const rawInfo = (artist.infoText || artist['Info Text'] || artist.description || '').toString();
+                const normalizedInfo = rawInfo.replace(/\s+/g, '').toLowerCase();
+                const nodeType = normalizedInfo === 'dj' && artistLabel ? 'dj' : 'artist';
+
                 const node = {
                     id: `artist_${index}`,
-                    type: 'artist',
+                    type: nodeType,
                     label: artistLabel,
                     data: artist,
                     x: x,
@@ -1021,7 +852,7 @@ class MusicNetwork {
                     vy: 0
                 };
                 this.nodes.push(node);
-                console.log('Created artist node:', node);
+                console.log('Created node:', node);
 
                 // Check various possible location field names
                 const location1 = (artist.location || artist.Location || artist['Location '] || '').toString().trim();
@@ -1126,14 +957,14 @@ class MusicNetwork {
             console.log('Created collective node:', node);
         });
         
-    console.log('Total nodes created:', this.nodes.length, ' (artists:', this.nodes.filter(n=>n.type==='artist').length, ', locations:', this.nodes.filter(n=>n.type==='location').length, ', genres:', this.nodes.filter(n=>n.type==='genre').length, ', collectives:', this.nodes.filter(n=>n.type==='collective').length, ')');
+    console.log('Total nodes created:', this.nodes.length, ' (producers:', this.nodes.filter(n=>n.type==='artist').length, ', locations:', this.nodes.filter(n=>n.type==='location').length, ', genres:', this.nodes.filter(n=>n.type==='genre').length, ', collectives:', this.nodes.filter(n=>n.type==='collective').length, ')');
     }
     
     createConnections() {
         this.connections = [];
         
         this.nodes.forEach(node => {
-            if (node.type === 'artist') {
+            if (node.type === 'artist' || node.type === 'dj') {
                 const artist = node.data;
                 
                 // Get location and genre values with multiple possible field names
@@ -1184,8 +1015,12 @@ class MusicNetwork {
         });
         
         console.log('Created connections:', this.connections.length);
-        // build quick lookup structures used by rendering and the simulation tick
+        // build quick lookup structures used by rendering and interaction helpers
         this.buildIndexes();
+        this.applySearchFilter();
+        if (this.activeView === 'list') {
+            this.renderListView();
+        }
     }
 
     // Build in-memory indexes and object references to avoid repeated .find() calls
@@ -1196,6 +1031,377 @@ class MusicNetwork {
             to: this.nodeMap.get(c.to) || null,
             type: c.type
         }));
+    }
+
+    isNodeVisible(node) {
+        if (!node) return false;
+        const typeVisible = this.visibleTypes.hasOwnProperty(node.type) ? this.visibleTypes[node.type] : true;
+        const searchActive = !!this.searchTerm;
+
+        if (!searchActive) {
+            return typeVisible;
+        }
+
+        if (!this.filteredNodeIds) {
+            return typeVisible;
+        }
+
+        if (!this.filteredNodeIds.has(node.id)) {
+            return false;
+        }
+
+        // When searching, allow matches (and their neighbors) even if their type is hidden.
+        if (!typeVisible && searchActive) {
+            return true;
+        }
+
+        return true;
+    }
+
+    shouldRenderConnection(cref) {
+        if (!cref || !cref.from || !cref.to) return false;
+        return this.isNodeVisible(cref.from) && this.isNodeVisible(cref.to);
+    }
+
+    _nodeSearchHaystack(node) {
+        const parts = [];
+        if (!node) return parts;
+        if (node.label) parts.push(String(node.label).toLowerCase());
+        if ((node.type === 'artist' || node.type === 'dj') && node.data) {
+            Object.values(node.data).forEach((val) => {
+                if (typeof val === 'string' && val.trim()) {
+                    parts.push(val.toLowerCase());
+                }
+            });
+        }
+        return parts;
+    }
+
+    applySearchFilter() {
+        const term = (this.searchTerm || '').toLowerCase();
+        if (!term) {
+            this.filteredNodeIds = null;
+            return;
+        }
+
+        if (!this.connectionRefs || this.connectionRefs.length === 0) {
+            this.buildIndexes();
+        }
+
+        const matched = new Set();
+        this.nodes.forEach((node) => {
+            const haystack = this._nodeSearchHaystack(node);
+            if (haystack.some((text) => text.includes(term))) {
+                matched.add(node.id);
+            }
+        });
+
+        if (matched.size === 0) {
+            this.filteredNodeIds = new Set();
+            return;
+        }
+
+        const result = new Set(matched);
+        this.connectionRefs.forEach((cref) => {
+            if (!cref || !cref.from || !cref.to) return;
+            const fromId = cref.from.id;
+            const toId = cref.to.id;
+            if (matched.has(fromId)) result.add(toId);
+            if (matched.has(toId)) result.add(fromId);
+        });
+
+        this.filteredNodeIds = result;
+    }
+
+    switchView(view) {
+        const targetView = view === 'list' ? 'list' : 'network';
+        this.activeView = targetView;
+
+        if (!this.networkContainer) this.networkContainer = document.getElementById('graph-container');
+        if (!this.listContainer) this.listContainer = document.getElementById('list-container');
+
+        if (this.networkContainer) {
+            if (targetView === 'list') this.networkContainer.classList.add('hidden');
+            else this.networkContainer.classList.remove('hidden');
+        }
+
+        if (this.listContainer) {
+            if (targetView === 'list') this.listContainer.classList.remove('hidden');
+            else this.listContainer.classList.add('hidden');
+        }
+
+        if (this.viewToggleButton) {
+            this.viewToggleButton.textContent = targetView === 'list' ? 'network view' : 'list view';
+        }
+
+        if (targetView === 'list') {
+            this.renderListView();
+            if (this.listContainer) this.listContainer.scrollTop = 0;
+        } else {
+            this.render();
+        }
+
+        if (this.explainerTextElement) {
+            const fallback = this.explainerMessages.network || this.explainerTextElement.textContent;
+            this.explainerTextElement.textContent = targetView === 'list'
+                ? this.explainerMessages.list
+                : fallback;
+        }
+
+        document.body.classList.toggle('list-view-active', targetView === 'list');
+        this.updateListLayoutSizing();
+        this.updateMobileControlsLayout();
+    }
+
+    renderListView() {
+        if (!this.nodeListElement) return;
+
+        const container = this.nodeListElement;
+        container.innerHTML = '';
+
+        const typeOrder = ['artist', 'dj', 'location', 'genre', 'collective'];
+        const typeLabels = {
+            artist: 'producers',
+            dj: 'djs',
+            location: 'locations',
+            genre: 'genres',
+            collective: 'collectives'
+        };
+
+        const degreeMap = new Map();
+        this.connections.forEach((conn) => {
+            if (!conn) return;
+            if (conn.from) degreeMap.set(conn.from, (degreeMap.get(conn.from) || 0) + 1);
+            if (conn.to) degreeMap.set(conn.to, (degreeMap.get(conn.to) || 0) + 1);
+        });
+
+        let totalVisible = 0;
+
+        const dotColors = {
+            artist: this.nodeTypes.artist.color,
+            dj: this.nodeTypes.dj.color,
+            location: this.nodeTypes.location.color,
+            genre: this.nodeTypes.genre.color,
+            collective: this.nodeTypes.collective.color
+        };
+
+        typeOrder.forEach((type) => {
+            const group = this.nodes.filter((node) => node.type === type && this.isNodeVisible(node));
+            if (group.length === 0) return;
+
+            totalVisible += group.length;
+            group.sort((a, b) => String(a.label || '').toLowerCase().localeCompare(String(b.label || '').toLowerCase()));
+
+            const section = document.createElement('div');
+            section.className = 'node-section';
+
+            const title = document.createElement('div');
+            title.className = 'node-section-title';
+            title.textContent = `${typeLabels[type]} (${group.length})`;
+            section.appendChild(title);
+
+            const list = document.createElement('ul');
+            list.className = 'node-section-list';
+
+            group.forEach((node) => {
+                const li = document.createElement('li');
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'node-list-item-btn';
+
+                const header = document.createElement('div');
+                header.className = 'node-list-header';
+
+                const nameSpan = document.createElement('span');
+                nameSpan.className = 'node-list-name';
+                const dot = document.createElement('span');
+                dot.className = 'node-list-dot';
+                dot.style.backgroundColor = dotColors[type] || '#00ff00';
+                nameSpan.appendChild(dot);
+                nameSpan.appendChild(document.createTextNode(node.label || ''));
+
+                const badge = document.createElement('span');
+                badge.className = 'node-list-badge';
+                badge.textContent = type === 'artist' ? 'producer' : type;
+
+                header.appendChild(nameSpan);
+                header.appendChild(badge);
+                btn.appendChild(header);
+
+                const meta = document.createElement('span');
+                meta.className = 'node-list-meta';
+
+                if (type === 'artist' || type === 'dj') {
+                    meta.textContent = this.buildArtistMeta(node.data);
+                    btn.addEventListener('click', () => this.showArtistModal(node.data));
+                } else {
+                    const count = degreeMap.get(node.id) || 0;
+                    meta.textContent = `${count} connection${count === 1 ? '' : 's'}`;
+                    btn.addEventListener('click', () => this.showGroupModal(node));
+                }
+
+                btn.appendChild(meta);
+                li.appendChild(btn);
+                list.appendChild(li);
+            });
+
+            section.appendChild(list);
+            container.appendChild(section);
+        });
+
+        if (this.listEmptyState) {
+            if (totalVisible === 0) {
+                const message = this.searchTerm ? 'no nodes match this search' : 'no nodes to display';
+                this.listEmptyState.textContent = message;
+                this.listEmptyState.classList.remove('hidden');
+            } else {
+                this.listEmptyState.classList.add('hidden');
+            }
+        }
+    }
+
+    updateListLayoutSizing() {
+        if (!this.listContainer) {
+            this.listContainer = document.getElementById('list-container');
+        }
+
+        const container = this.listContainer;
+        if (!container) return;
+
+        const listViewActive = document.body.classList.contains('list-view-active');
+        if (!listViewActive) {
+            container.style.height = '';
+            container.style.maxHeight = '';
+            return;
+        }
+
+        const isMobile = window.innerWidth <= 768;
+        const header = document.querySelector('header');
+        const bottomInfo = document.getElementById('bottom-info');
+        const controls = document.getElementById('controls');
+        const headerHeight = header ? Math.ceil(header.getBoundingClientRect().height) : 0;
+        const bottomHeight = bottomInfo ? Math.ceil(bottomInfo.getBoundingClientRect().height) : 0;
+        const controlsHeight = (controls && (controls.classList.contains('mobile-bottom-controls') || window.innerWidth <= 768))
+            ? Math.ceil(controls.getBoundingClientRect().height)
+            : 0;
+        const viewportHeight = window.visualViewport
+            ? Math.floor(window.visualViewport.height || window.innerHeight)
+            : (window.innerHeight || document.documentElement.clientHeight);
+        const footerHeight = Math.max(bottomHeight, controlsHeight);
+    const margin = isMobile ? 0 : 24;
+        const available = Math.max(260, viewportHeight - headerHeight - footerHeight - margin);
+
+        container.style.maxHeight = available + 'px';
+        container.style.height = available + 'px';
+    }
+
+    updateMobileControlsLayout() {
+        const controls = document.getElementById('controls');
+        if (!controls) return;
+
+        const isMobile = window.innerWidth <= 768;
+        const wasMobile = this.mobileControlsActive;
+        this.mobileControlsActive = isMobile;
+
+        if (this.aboutButton && !this.aboutButtonHome) {
+            this.aboutButtonHome = this.aboutButton.parentElement;
+        }
+
+        if (this.controlsBottomRow && this.aboutButton) {
+            if (isMobile) {
+                if (this.aboutButton.parentElement !== this.controlsBottomRow) {
+                    this.controlsBottomRow.appendChild(this.aboutButton);
+                }
+                this.aboutButton.classList.add('control-btn');
+            } else {
+                if (this.aboutButtonHome && this.aboutButton.parentElement !== this.aboutButtonHome) {
+                    this.aboutButtonHome.appendChild(this.aboutButton);
+                }
+                this.aboutButton.classList.remove('control-btn');
+            }
+        }
+
+        if (isMobile) {
+            controls.classList.add('mobile-bottom-controls');
+            if (!wasMobile) {
+                this.legendCollapsed = true;
+            }
+            controls.classList.toggle('legend-collapsed', this.legendCollapsed);
+        } else {
+            controls.classList.remove('mobile-bottom-controls');
+            controls.classList.remove('legend-collapsed');
+            this.legendCollapsed = false;
+        }
+
+        this.refreshLegendToggleUI(isMobile);
+        this.updateListLayoutSizing();
+
+        if (isMobile) {
+            const syncCanvas = () => {
+                this.setupCanvas();
+                this.render();
+            };
+            if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+                window.requestAnimationFrame(syncCanvas);
+            } else {
+                setTimeout(syncCanvas, 0);
+            }
+        }
+    }
+
+    toggleLegend() {
+        const isMobile = window.innerWidth <= 768;
+        if (!isMobile) return;
+
+        this.legendCollapsed = !this.legendCollapsed;
+        const controls = document.getElementById('controls');
+        if (controls) {
+            controls.classList.toggle('legend-collapsed', this.legendCollapsed);
+        }
+        this.refreshLegendToggleUI(true);
+        this.updateListLayoutSizing();
+
+        const syncCanvas = () => {
+            this.setupCanvas();
+            this.render();
+        };
+        if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+            window.requestAnimationFrame(syncCanvas);
+        } else {
+            setTimeout(syncCanvas, 0);
+        }
+    }
+
+    refreshLegendToggleUI(isMobile) {
+        if (!this.legendToggleButton) return;
+
+        if (isMobile) {
+            const expanded = !this.legendCollapsed;
+            this.legendToggleButton.textContent = expanded ? 'hide filters' : 'show filters';
+            this.legendToggleButton.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+        } else {
+            this.legendToggleButton.textContent = 'filters';
+            this.legendToggleButton.setAttribute('aria-expanded', 'true');
+        }
+    }
+
+    buildArtistMeta(artist = {}) {
+        if (!artist) return 'no details available';
+
+        const parts = [];
+        const genre = (artist.genre || artist.Genre || '').toString().trim();
+        if (genre) parts.push(genre);
+
+        const loc1 = (artist.location || artist.Location || artist['Location '] || '').toString().trim();
+        const loc2 = (artist.location2 || artist['Location 2'] || artist['Location2'] || '').toString().trim();
+        const locations = Array.from(new Set([loc1, loc2].filter(Boolean)));
+        if (locations.length) parts.push(locations.join(', '));
+
+        const collective = (artist.collective || artist.Collective || '').toString().trim();
+        if (collective) parts.push(collective);
+
+        if (parts.length === 0) return 'no details available';
+        return parts.join(' | ');
     }
 
     // Create a simple static layout: place nodes in concentric, degree-weighted rings
@@ -1361,8 +1567,7 @@ class MusicNetwork {
             // stronger opacity for readability
             this.ctx.strokeStyle = 'rgba(0,255,0,0.55)';
             for (const cref of this.connectionRefs) {
-                if (!cref.from || !cref.to) continue;
-                if (!this.visibleTypes[cref.from.type] || !this.visibleTypes[cref.to.type]) continue;
+                if (!this.shouldRenderConnection(cref)) continue;
                 this.ctx.beginPath();
                 this.ctx.moveTo(cref.from.x, cref.from.y);
                 this.ctx.lineTo(cref.to.x, cref.to.y);
@@ -1370,7 +1575,7 @@ class MusicNetwork {
             }
 
             this.nodes.forEach(node => {
-                if (!this.visibleTypes[node.type]) return; // skip hidden types
+                if (!this.isNodeVisible(node)) return; // skip hidden types
                 const nodeType = this.nodeTypes[node.type];
 
                 // Draw node circle
@@ -1406,8 +1611,7 @@ class MusicNetwork {
             // stronger opacity in enhanced mode as well
             this.ctx.strokeStyle = 'rgba(0,255,0,0.60)';
             for (const cref of this.connectionRefs) {
-                if (!cref.from || !cref.to) continue;
-                if (!this.visibleTypes[cref.from.type] || !this.visibleTypes[cref.to.type]) continue;
+                if (!this.shouldRenderConnection(cref)) continue;
                 this.ctx.beginPath();
                 this.ctx.moveTo(cref.from.x, cref.from.y);
                 this.ctx.lineTo(cref.to.x, cref.to.y);
@@ -1415,7 +1619,7 @@ class MusicNetwork {
             }
 
             this.nodes.forEach(node => {
-                if (!this.visibleTypes[node.type]) return;
+                if (!this.isNodeVisible(node)) return;
                 const nodeType = this.nodeTypes[node.type];
 
                 // Draw node with subtle halo for visibility
@@ -1478,7 +1682,7 @@ class MusicNetwork {
     
     getNodeAt(pos) {
         return this.nodes.find(node => {
-            if (!this.visibleTypes[node.type]) return false; // ignore hidden types
+            if (!this.isNodeVisible(node)) return false; // ignore hidden types
             const dx = node.x - pos.x;
             const dy = node.y - pos.y;
             const distance = Math.sqrt(dx * dx + dy * dy);
@@ -1486,13 +1690,6 @@ class MusicNetwork {
         });
     }
 
-    // helper to get d3 node by id (if simulation present)
-    _getD3Node(id) {
-        if (this._d3nodeMap) return this._d3nodeMap.get(id) || null;
-        if (this._d3nodes) return this._d3nodes.find(n => n.id === id) || null;
-        return null;
-    }
-    
     handleMouseDown(e) {
         const pos = this.getMousePos(e);
         const node = this.getNodeAt(pos);
@@ -1510,16 +1707,6 @@ class MusicNetwork {
             this._mouseDownPos = { x: pos.x, y: pos.y };
             this._mouseStartNodePos = { x: node.x, y: node.y };
             // Do not open modal on immediate mousedown; use click/tap release to open
-            // If simulation active, fix the node in the simulation so physics respects manual moves
-            if (this.simulation) {
-                const d3node = this._getD3Node(node.id);
-                if (d3node) {
-                    d3node.fx = node.x;
-                    d3node.fy = node.y;
-                    // keep simulation lightly active while dragging so connected nodes behave
-                    this.simulation.alphaTarget(0.2).restart();
-                }
-            }
         } else {
             // Start panning
             // user is interacting -> stop auto-centering temporarily
@@ -1536,14 +1723,6 @@ class MusicNetwork {
             // Move dragged node
             this.draggedNode.x = pos.x - this.nodeDragOffset.x;
             this.draggedNode.y = pos.y - this.nodeDragOffset.y;
-            // update d3 simulation fixed position if present (use fast map)
-            if (this.simulation) {
-                const d3node = this._getD3Node(this.draggedNode.id);
-                if (d3node) {
-                    d3node.fx = this.draggedNode.x;
-                    d3node.fy = this.draggedNode.y;
-                }
-            }
             this.render();
         } else if (this.isDragging) {
             this.offsetX = e.clientX - this.dragStart.x;
@@ -1564,45 +1743,33 @@ class MusicNetwork {
             const moved = Math.sqrt(dx*dx + dy*dy) > 6; // slightly lower threshold for responsiveness
             if (!moved) {
                 // It was a click (no significant movement)
-                if (node.type === 'artist') this.showArtistModal(node.data);
+                if (node.type === 'artist' || node.type === 'dj') this.showArtistModal(node.data);
                 else this.showGroupModal(node);
             }
         }
 
         this.isDragging = false;
         this.nodeDragging = false;
-        // release simulation fixation if present: clear fx/fy using fast map and lightly nudge simulation
-        if (this.simulation && this.draggedNode) {
-            const d3node = this._getD3Node(this.draggedNode.id);
-            if (d3node) {
-                d3node.fx = null;
-                d3node.fy = null;
-                // lightly nudge simulation so layout responds subtly, then settle
-                this.simulation.alphaTarget(0.04);
-                setTimeout(() => { if (this.simulation) this.simulation.alphaTarget(0); }, 400);
-            }
-        }
         this.draggedNode = null;
         this._mouseDownPos = null;
         this._mouseStartNodePos = null;
     }
 
-    // helper to show a group modal (for location or genre) listing matching artists
+    // helper to show a group modal (for location or genre) listing matching producers
     showGroupModal(node) {
         const label = node.label || '';
         const type = node.type; // 'location' or 'genre'
         const title = `${label} — ${type}`;
 
-        // find artists related to this node via connections (preferred)
-        const relatedArtistIds = this.connections
-            .filter(c => c.to === node.id && c.from && c.from.startsWith('artist_'))
-            .map(c => c.from);
-
-        let matches = relatedArtistIds.map(id => this.nodes.find(n => n.id === id)).filter(Boolean);
+    // find producers related to this node via connections (preferred)
+        this.buildIndexes();
+        let matches = this.connectionRefs
+            .filter(cref => cref.to && cref.to.id === node.id && cref.from && (cref.from.type === 'artist' || cref.from.type === 'dj'))
+            .map(cref => cref.from);
 
         // fallback to data-field matching if no connections found
         if (matches.length === 0) {
-            matches = this.nodes.filter(n => n.type === 'artist' && n.data).filter(a => {
+            matches = this.nodes.filter(n => (n.type === 'artist' || n.type === 'dj') && n.data).filter(a => {
                 const art = a.data;
                 const genre = (art.genre || art.Genre || '').toString().trim().toLowerCase();
                 const loc1 = (art.location || art.Location || '').toString().trim().toLowerCase();
@@ -1620,7 +1787,7 @@ class MusicNetwork {
         // Build list HTML
         let html = '<div class="group-list">';
         if (matches.length === 0) {
-            html += '<p style="margin-bottom:12px;">No artists found for this ' + type + '.</p>';
+            html += '<p style="margin-bottom:12px;">No producers found for this ' + type + '.</p>';
         } else {
             html += '<ul style="list-style:none;padding:0;margin:0 0 12px 0;">';
             matches.forEach((m, i) => {
@@ -1677,14 +1844,6 @@ class MusicNetwork {
             // store initial touch position to detect taps vs drags
             this._touchStartPos = { x: pos.x, y: pos.y };
             this._touchStartNodePos = { x: node.x, y: node.y };
-            if (this.simulation) {
-                const d3node = this._getD3Node(node.id);
-                if (d3node) {
-                    d3node.fx = node.x;
-                    d3node.fy = node.y;
-                    this.simulation.alphaTarget(0.2).restart();
-                }
-            }
         } else if (e.touches.length === 1) {
             // user is interacting -> stop auto-centering temporarily
             this.autoCentering = false;
@@ -1721,13 +1880,6 @@ class MusicNetwork {
             const pos = this.getTouchPos(e);
             this.draggedNode.x = pos.x - this.nodeDragOffset.x;
             this.draggedNode.y = pos.y - this.nodeDragOffset.y;
-            if (this.simulation) {
-                const d3node = this._getD3Node(this.draggedNode.id);
-                if (d3node) {
-                    d3node.fx = this.draggedNode.x;
-                    d3node.fy = this.draggedNode.y;
-                }
-            }
             this.render();
         } else if (this.isDragging && e.touches.length === 1) {
             const touch = e.touches[0];
@@ -1753,23 +1905,13 @@ class MusicNetwork {
             const dy = last.y - pos.y;
             const moved = Math.sqrt(dx*dx + dy*dy) > 8; // slightly larger threshold for touch
             if (!moved) {
-                if (this.draggedNode.type === 'artist') this.showArtistModal(this.draggedNode.data);
+                if (this.draggedNode.type === 'artist' || this.draggedNode.type === 'dj') this.showArtistModal(this.draggedNode.data);
                 else this.showGroupModal(this.draggedNode);
             }
         }
 
         this.isDragging = false;
         this.nodeDragging = false;
-        if (this.simulation && this.draggedNode) {
-            const d3node = this._getD3Node(this.draggedNode.id);
-            if (d3node) {
-                d3node.fx = null;
-                d3node.fy = null;
-                // lightly nudge simulation so layout responds subtly, then settle
-                this.simulation.alphaTarget(0.04);
-                setTimeout(() => { if (this.simulation) this.simulation.alphaTarget(0); }, 400);
-            }
-        }
         this.draggedNode = null;
         this._touchStartPos = null;
         this._touchStartNodePos = null;
@@ -1862,16 +2004,16 @@ class MusicNetwork {
 
         modalContent.innerHTML = `
             <div class="about-content">
-                <p>The <strong>COLLISIONI Electronic Music Network</strong> is an interactive visualization of the electronic music scene in Südtirol/Alto Adige. This map connects artists, locations, genres, and collectives to highlight the vast diversity of people creating music in this field.</p>
+                <p>The <strong>COLLISIONI Electronic Music Network</strong> is an interactive visualization of the electronic music scene in Südtirol/Alto Adige. This map connects producers, locations, genres, and collectives to highlight the vast diversity of people creating music in this field.</p>
                 
                 <ul style="margin: 15px 0; padding-left: 20px;">
-                    <li><span style="color: #00ff00;">●</span> <strong>Artists</strong> - Musicians producers</li>
+                    <li><span style="color: #00ff00;">●</span> <strong>Producers</strong> - Electronic music creators</li>
                     <li><span style="color: #ff0080;">●</span> <strong>Locations</strong> - Cities and venues where they live and work</li>
                     <li><span style="color: #0080ff;">●</span> <strong>Genres</strong> - Musical styles and categories</li>
                     <li><span style="color: #ffff00;">●</span> <strong>Collectives</strong> - Association to groups and music crews in Südtirol/Alto Adige</li>
                 </ul>
                 
-                <p>Click on any node to explore connections and discover new artists. Get in touch for booking requests, collaborations, knowledge exchange or simply say hi. Drag nodes to rearrange the network, zoom to get a better view, and use the reset button to center the visualization.</p>
+                <p>Click on any node to explore connections and discover new producers. Get in touch for booking requests, collaborations, knowledge exchange or simply say hi. Drag nodes to rearrange the network and zoom to get a better view.</p>
                 
                 <p>Data is sourced from our open and community-maintained database. Please be mindful of other people's information. If you delete information, it disappears from the website. Want to add your project to Collisioni or update information?</p>
                 
