@@ -26,6 +26,11 @@ header {
     border-bottom: 1px solid #00ff00;
     text-align: left;
     background: #000;
+    /* Make header sticky so it remains visible above the canvas */
+    position: sticky;
+    top: 0;
+    width: 100%;
+    z-index: 99999; /* keep header above the canvas and any transformed stacking contexts */
 }
 
 .header-content {
@@ -305,7 +310,7 @@ body.list-view-active #list-empty {
     position: absolute;
     top: 10px;
     left: 10px;
-    z-index: 100;
+    z-index: 3200; /* keep controls above modal overlay */
     display: flex;
     flex-direction: column;
     gap: 10px;
@@ -330,7 +335,7 @@ body.list-view-active #list-empty {
 }
 
 .control-btn {
-    background: transparent;
+    background: #000000a1;
     border: 1px solid #00ff00;
     color: #00ff00;
     padding: 8px 12px;
@@ -395,7 +400,7 @@ body.list-view-active #list-empty {
         #legend { gap: 10px; }
     }
 
-.artist-dot, .dj-dot, .location-dot, .genre-dot, .collective-dot {
+.artist-dot, .dj-dot, .location-dot, .genre-dot, .collective-dot, .other-dot {
     width: 8px;
     height: 8px;
     border-radius: 50%;
@@ -416,6 +421,10 @@ body.list-view-active #list-empty {
 
 .genre-dot {
     background-color: #0080ff;
+}
+
+.other-dot {
+    background-color: #bfbfbf;
 }
 
 .collective-dot {
@@ -502,6 +511,14 @@ body.list-view-active #list-empty {
     font-size: 0.9rem;
 }
 
+#artist-info {
+    color: #b0d0aa;
+}
+
+#artist-info .label {
+    color: #00ff00;
+}
+
 #artist-name, #artist-genre, #artist-location, #artist-location2 {
     font-size: 1rem;
 }
@@ -523,6 +540,23 @@ body.list-view-active #list-empty {
 }
 
 #artist-url:hover {
+    background: #00ff00;
+    color: #000;
+    text-decoration: none;
+}
+
+/* Use same link styling for collective links inside artist modal */
+.artist-collective-link {
+    color: #0080ff;
+    text-decoration: underline;
+    word-break: break-all;
+    transition: all 0.12s ease;
+    display: inline-block;
+    padding: 2px 4px;
+    border-radius: 3px;
+}
+
+.artist-collective-link:hover {
     background: #00ff00;
     color: #000;
     text-decoration: none;
@@ -581,7 +615,7 @@ body.list-view-active #list-empty {
     justify-content: space-between;
     padding: 0 20px;
     font-size: 0.8rem;
-    z-index: 1000;
+    z-index: 3300; /* float above modal overlay */
 }
 
 .explainer-text {
@@ -740,17 +774,13 @@ body.list-view-active #list-empty {
     }
 }
 
-/* When modal is open, hide other UI chrome so only modal is visible */
+/* When modal is open, prevent scroll without hiding chrome */
 body.modal-open {
     overflow: hidden; /* prevent background scrolling */
 }
 
-body.modal-open header,
-body.modal-open #controls,
-body.modal-open #bottom-info,
-body.modal-open #explanation,
-body.modal-open #list-container {
-    display: none !important;
+body.modal-open #controls {
+    z-index: 1900; /* position controls just beneath the modal overlay */
 }
 
 /* Make overlay highest z-index to cover everything */
@@ -777,6 +807,8 @@ body.modal-open #list-container {
         position: static;
         order: -1;
     }
+
+    
     
     .header-text {
         padding: 0;
@@ -927,6 +959,19 @@ body.modal-open #list-container {
         align-items: center;
         gap: 10px;
         min-height: 20px;
+    }
+
+    /* Hide search by default when filters (legend) are collapsed on mobile */
+    #controls.mobile-bottom-controls .search-wrapper {
+        display: none;
+        width: 100%;
+        box-sizing: border-box;
+    }
+
+    /* When the mobile controls are expanded (not legend-collapsed), show search */
+    #controls.mobile-bottom-controls:not(.legend-collapsed) .search-wrapper {
+        display: block;
+        padding: 0 4px;
     }
 
     #controls.mobile-bottom-controls .legend-toggle-row {

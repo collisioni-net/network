@@ -24,8 +24,19 @@ class MusicNetwork {
             dj: { color: '#ff6f00', radius: 8 },
             location: { color: '#ff0080', radius: 5 },
             genre: { color: '#0080ff', radius: 6 },
-            collective: { color: '#ffff00', radius: 7 }
+            collective: { color: '#ffff00', radius: 7 },
+            other: { color: '#bfbfbf', radius: 7 }
         };
+
+    // Hover interaction state (desktop)
+    this.hoverNode = null;             // currently activated hover node
+    this._hoverCandidate = null;       // node beneath cursor candidate before delay
+    this._hoverTimer = null;           // debounce timer id for hover activation
+    this.hoverProgress = 0;            // 0..1 animation progress for fade
+    this._hoverAnimating = false;      // whether an animation rAF loop is running
+    this.hoverActive = false;          // whether hover effect is currently active
+    this.hoverConnectedNodes = new Set(); // ids of nodes related to hoverNode
+    this.hoverConnectedEdges = new Set(); // keys of edges related to hoverNode
 
     // runtime caches to avoid O(n^2) lookups during render/tick
     this.nodeMap = new Map();
@@ -46,7 +57,8 @@ class MusicNetwork {
             dj: true,
             location: true,
             genre: true,
-            collective: true
+            collective: true,
+            other: true
         };
 
         // View & search state
@@ -77,26 +89,54 @@ class MusicNetwork {
     this._handleViewportResize = null;
     this._resizeDebounce = null;
 
+    // Prevent unexpected automatic layout runs immediately after user interaction
+    this._suppressRunLayoutUntil = 0; // timestamp in ms until which runLayout is suppressed
+
         // Tuning parameters (exposed to UI sliders)
         this.tuning = {
-            repulsion: 0.22,        // repulsion factor (lower = less push)
-            attraction: 0.9,        // attraction base (higher = nodes pulled together more)
+            repulsion: 0.03,        // repulsion factor (lower = less push)
+            attraction: 0.8,        // attraction base (higher = nodes pulled together more)
             gravity: 0.5,           // gravity toward center (screenshot default)
-            sameTypeRepel: 0.35,    // extra repulsion for same-type nodes (producers/djs)
-            minDistance: 54,        // minimum readable distance (px)
+            sameTypeRepel: 0.55,    // extra repulsion for same-type nodes (producers/djs)
+            minDistance:40,        // minimum readable distance (px)
             iterations: 270         // layout iterations when running
         };
 
     // Multiplier applied to the automatic fit/initial view to allow a zoomed-in experience
-    // Set to 4 to make the graph appear 4x larger by default (user requested)
-    this.initialZoomMultiplier = 4;
+    // Reduce on mobile to prevent over-zooming while preserving a slightly elevated zoom on desktop.
+    this.initialZoomMultiplier = 2;
+
+    // Desktop expansion multiplier to make the default view slightly more expanded
+    // (values >1 zoom in a bit). Tune as desired (1.0 = no change).
+    // User requested ~10% more expansion.
+    this.desktopExpandMultiplier = 1.30;
+    // Desktop initial zoom multiplier (how much to zoom in on desktop by default).
+    // Set to 2.0 to be closer to the mobile default zoom experience.
+    this.desktopInitialZoomMultiplier = 1.0;
 
         // internal debounce timer used when sliders auto-run a short layout
         this._tuningDebounceTimer = null;
 
+    // Desktop layout multiplier: how many viewport-widths/heights the virtual layout
+    // area should span. A value of 3 means the layout algorithm works in a space
+    // three times the visible viewport, allowing more spread and pan room.
+    this.desktopLayoutMultiplier = 3;
+    // Mobile layout multiplier controls how much extra space the force layout can
+    // occupy on smaller devices, giving more room for nodes to spread before final scaling.
+    this.mobileLayoutMultiplier = 1.6;
+    // Base scale the camera uses when centering on mobile before any dynamic fit adjustments.
+    this.mobileDefaultCenterScale = 1.6;
+
     // auto-centering while layout runs (disabled when user interacts)
     this.autoCentering = false; // enabled briefly after load or reset via ticks
     this.autoCenterTicks = 0;   // number of ticks to auto-center for
+
+    // Control whether automatic layout runs (from resize/timers) are allowed after init.
+    // We'll disable automatic re-layouts after initialization so user navigation doesn't
+    // trigger unexpected recalculations. Explicit UI actions (Run Layout button) still work.
+    this._autoLayoutEnabled = true;
+    // Track whether a modal dialog is currently overlaying the graph to avoid recalculations
+    this._modalOpen = false;
         
         this.init();
     }
@@ -117,56 +157,81 @@ class MusicNetwork {
             return hex;
         }
     }
+
+    // Darken a hex color by blending it toward black. amount between 0 (no change) and 1 (black)
+    _darkenColor(hex, amount = 0.5) {
+        try {
+            const h = (hex || '').replace('#','');
+            if (h.length !== 6) return hex;
+            const r = parseInt(h.substring(0,2),16);
+            const g = parseInt(h.substring(2,4),16);
+            const b = parseInt(h.substring(4,6),16);
+            const dr = Math.round(r * (1 - amount));
+            const dg = Math.round(g * (1 - amount));
+            const db = Math.round(b * (1 - amount));
+            const toHex = (v) => ('0' + v.toString(16)).slice(-2);
+            return `#${toHex(dr)}${toHex(dg)}${toHex(db)}`;
+        } catch (e) {
+            return hex;
+        }
+    }
     
     async init() {
-        console.log('Initializing music network...');
         this.setupCanvas();
         this.setupEventListeners();
+        
         await this.loadData();
-        console.log('Data loaded, creating nodes...');
         this.createNodes();
-        console.log('Creating connections...');
         this.createConnections();
     // Ensure indexes are built in case nodes changed
     this.buildIndexes();
-        console.log('Setting up force simulation...');
         this.setupSimulation();
-        console.log('Centering view...');
         this.centerView();
-        console.log('Rendering...');
         this.render();
         // Apply the default tuned layout once on load so the graph appears with these settings
         try {
-            this.runLayout(this.tuning.iterations);
+            this.runLayout(this.tuning.iterations, true);
             this.render();
         } catch (e) {
-            console.warn('Initial auto-layout failed:', e);
         }
         // remove tuning panel if present (we're hiding the overlay and using the built-in layout)
         const _tp = document.getElementById('tuning-panel');
         if (_tp) _tp.remove();
         document.getElementById('loading').style.display = 'none';
-        console.log('Initialization complete!');
+    // After initialization, disable automatic layout triggers so user navigation remains stable.
+    this._autoLayoutEnabled = false;
     }
 
     /***********************
      * d3-force integration
      ***********************/
     setupSimulation() {
-        // d3 removed: we rely solely on the built-in controlled layout
-        console.log('d3 disabled — using built-in controlled layout only');
         try {
-            this.runLayout(this.tuning.iterations);
+            this.runLayout(this.tuning.iterations, true);
             this.render();
         } catch (e) {
-            console.warn('runLayout failed during setupSimulation fallback:', e);
         }
     }
 
     // Improved, controlled force-directed layout (one-off)
     // Goals: reduce explosive repulsion, limit excessive attraction between nodes of same type (producers/djs),
     // keep layout readable and let users move nodes freely after layout finishes.
-    runLayout(iterations = 180) {
+    runLayout(iterations = 180, force = false) {
+        if (!force && this._modalOpen) {
+            return;
+        }
+
+        // If automatic layouts were disabled after init and this call is not forced, skip.
+        if (!force && !this._autoLayoutEnabled) {
+            return;
+        }
+
+        // Skip automatic layout runs if we've recently had user interaction that should
+        // suppress auto-layout (prevents unexpected re-layout on initial clicks).
+        if (!force && Date.now() < (this._suppressRunLayoutUntil || 0)) {
+            return;
+        }
+
         if (!this.nodes || this.nodes.length === 0) return;
 
         const isMobile = window.innerWidth <= 768;
@@ -186,16 +251,22 @@ class MusicNetwork {
             if (degree.has(c.to)) degree.set(c.to, degree.get(c.to) + 1);
         });
 
+        // Allow a larger virtual layout area on desktop so nodes can spread beyond
+        // the visible canvas. This creates more pan/expand room and avoids cramped
+        // outer edges. Use desktopLayoutMultiplier (e.g., 3) to multiply viewport size.
+    const layoutWidth = isMobile ? width * (this.mobileLayoutMultiplier || 1.5) : width * (this.desktopLayoutMultiplier || 3);
+    const layoutHeight = isMobile ? height * (this.mobileLayoutMultiplier || 1.5) : height * (this.desktopLayoutMultiplier || 3);
+
         layoutNodes.forEach((n) => {
             if (typeof n.x !== 'number' || typeof n.y !== 'number') {
-                n.x = Math.random() * width;
-                n.y = Math.random() * height;
+                n.x = Math.random() * layoutWidth;
+                n.y = Math.random() * layoutHeight;
             }
             n.x += (Math.random() - 0.5) * 2;
             n.y += (Math.random() - 0.5) * 2;
         });
 
-        const area = width * height;
+        const area = layoutWidth * layoutHeight;
         const baseKMultiplier = isMobile ? 1.15 : 0.65;
         const k = Math.sqrt(area / Math.max(1, layoutNodes.length)) * baseKMultiplier;
 
@@ -203,7 +274,7 @@ class MusicNetwork {
         let attractionBase = this.tuning.attraction;
         const gravityBase = isMobile ? this.tuning.gravity * 0.5 : this.tuning.gravity;
         const baseMinDist = this.tuning.minDistance;
-        const minDist = isMobile ? Math.max(45, Math.round(baseMinDist * 1.4)) : baseMinDist;
+    const minDist = isMobile ? Math.max(55, Math.round(baseMinDist * 1.5)) : baseMinDist;
 
         if (isMobile) {
             repulsionFactor *= 1.6;
@@ -260,8 +331,11 @@ class MusicNetwork {
                 forces.get(b.id).fy -= fy;
             }
 
-            const centerX = width / 2;
-            const centerY = height / 2;
+            // Center gravity should use the virtual layout center (layoutWidth/layoutHeight)
+            // so nodes are attracted to the true center of the extended layout area,
+            // not just the visible canvas centre which would squeeze the layout.
+            const centerX = layoutWidth / 2;
+            const centerY = layoutHeight / 2;
             const maxDegree = Math.max(1, ...Array.from(degree.values()));
             layoutNodes.forEach((n) => {
                 const deg = degree.get(n.id) || 0;
@@ -284,11 +358,12 @@ class MusicNetwork {
                 n.y += dy;
 
                 if (!isMobile) {
-                    n.x = Math.max(10, Math.min(width - 10, n.x));
-                    n.y = Math.max(10, Math.min(height - 10, n.y));
+                    // clamp within virtual layout area (not just the visible canvas)
+                    n.x = Math.max(10, Math.min(layoutWidth - 10, n.x));
+                    n.y = Math.max(10, Math.min(layoutHeight - 10, n.y));
                 } else {
-                    const horizMargin = Math.max(200, Math.round(width * 0.4));
-                    const vertMargin = Math.max(100, Math.round(height * 0.25));
+                    const horizMargin = Math.max(250, Math.round(width * 0.55));
+                    const vertMargin = Math.max(140, Math.round(height * 0.35));
                     n.x = Math.max(-horizMargin, Math.min(width + horizMargin, n.x));
                     n.y = Math.max(-vertMargin, Math.min(height + vertMargin, n.y));
                 }
@@ -320,22 +395,24 @@ class MusicNetwork {
         if (!isMobile) {
             const padding = 40;
             layoutNodes.forEach((n) => {
-                n.x = Math.max(padding, Math.min(width - padding, n.x));
-                n.y = Math.max(padding, Math.min(height - padding, n.y));
+                // clamp to the virtual layout extents so nodes can occupy the expanded area
+                n.x = Math.max(padding, Math.min(layoutWidth - padding, n.x));
+                n.y = Math.max(padding, Math.min(layoutHeight - padding, n.y));
             });
         }
-
-        console.log('Layout complete (controlled force-directed)');
         this.fitToScreen();
     }
 
     // Debounced helper to schedule a short layout run after tuning changes
     _scheduleTuningRun(ms = 250, iterations = 80) {
+        if (this._modalOpen) return;
         if (this._tuningDebounceTimer) clearTimeout(this._tuningDebounceTimer);
         this._tuningDebounceTimer = setTimeout(() => {
             try {
-                this.runLayout(iterations);
-                this.render();
+                    if (this._autoLayoutEnabled && !this._modalOpen) {
+                        this.runLayout(iterations);
+                        this.render();
+                    }
             } catch (e) {
                 console.error('Auto-run layout failed:', e);
             }
@@ -344,6 +421,11 @@ class MusicNetwork {
     }
     
     setupCanvas() {
+        // If a modal is open, skip canvas setup to prevent layout shifts
+        if (document.body.classList.contains('modal-open')) {
+            return;
+        }
+        
         const container = document.getElementById('graph-container');
         const rect = container.getBoundingClientRect();
         // Determine sizes; ensure the graph container uses the available viewport height
@@ -385,7 +467,6 @@ class MusicNetwork {
         this.canvas.style.width = canvasWidth + 'px';
         this.canvas.style.height = canvasHeight + 'px';
         
-        console.log('Canvas setup:', { width: canvasWidth, height: canvasHeight, isMobile });
         
         // Resize handler
         if (!this._handleResize) {
@@ -393,7 +474,7 @@ class MusicNetwork {
                 if (this._resizeDebounce) clearTimeout(this._resizeDebounce);
                 this._resizeDebounce = setTimeout(() => {
                     this.setupCanvas();
-                    if (window.innerWidth <= 768) {
+                    if (window.innerWidth <= 768 && this._autoLayoutEnabled && !this._modalOpen) {
                         this.runLayout(100);
                     }
                     this.render();
@@ -513,6 +594,11 @@ class MusicNetwork {
                         this.renderListView();
                     }
                     this.render();
+                    // Debugging: log visibility map and a short sample of multi-type nodes
+                    try {
+                    
+                    } catch (e) {
+                    }
                 });
             });
         }
@@ -605,8 +691,8 @@ class MusicNetwork {
         runBtn.textContent = 'Run Layout';
         runBtn.style.flex = '1';
         runBtn.addEventListener('click', () => {
-            // use tuned iterations
-            this.runLayout(this.tuning.iterations);
+            // use tuned iterations (force a layout regardless of auto-layout flag)
+            this.runLayout(this.tuning.iterations, true);
             this.render();
         });
         btnRow.appendChild(runBtn);
@@ -629,6 +715,7 @@ class MusicNetwork {
     async loadData() {
         try {
             // Convert Google Sheets URL to CSV export format
+            // New database sheet (user-provided)
             const sheetId = '1ICmPFunrRBS-2Y8p40f8N13y9DKDzf2pl1Cat-BABP4';
             const csvUrl = `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv&gid=0`;
             
@@ -650,10 +737,8 @@ class MusicNetwork {
                 throw new Error('No valid producer data found');
             }
             
-            console.log('Loaded producers:', this.artists);
         } catch (error) {
             console.error('Error loading data from Google Sheets:', error);
-            console.log('Using sample data for demonstration...');
             
             // Enhanced sample data for testing
             this.artists = [
@@ -724,14 +809,16 @@ class MusicNetwork {
     parseCSV(csvText) {
         // Header-aware CSV parsing: map values to header names so column order doesn't matter
         const lines = csvText.split('\n').filter(l => l.trim() !== '');
-        if (lines.length === 0) return [];
+        if (lines.length < 2) return [];
 
-        const rawHeaders = this.parseCSVLine(lines[0]).map(h => h.trim().replace(/"/g, ''));
+        // The first row contains human-readable instructions; the declaration/header row is the SECOND row
+        const rawHeaders = this.parseCSVLine(lines[1]).map(h => h.trim().replace(/"/g, ''));
         const headers = rawHeaders.map(h => h.toLowerCase());
 
         const artists = [];
 
-        for (let i = 1; i < lines.length; i++) {
+        // Data rows start at index 2
+        for (let i = 2; i < lines.length; i++) {
             const values = this.parseCSVLine(lines[i]);
             if (values.length === 0) continue;
 
@@ -742,39 +829,80 @@ class MusicNetwork {
                 row[key] = values[j] ? values[j].trim().replace(/"/g, '') : '';
             }
 
-            // Normalize commonly used header names into our expected properties
-            const artistObj = {
-                firstName: row['First Name'] || row['first name'] || row['firstname'] || row['first_name'] || row['first'] || row['first_name '] || row['first name '] || row['First'] || '',
-                artistName: row['Artist Name'] || row['artist name'] || row['artistname'] || row['artist'] || row['Artist'] || row['artist name '] || '',
-                genre: row['Genre'] || row['genre'] || row['GENRE'] || '',
-                location: row['Location'] || row['location'] || row['place'] || row['town'] || row['Location '] || '',
-                location2: row['Location 2'] || row['location 2'] || row['location2'] || row['alt location'] || row['location2 '] || '',
-                url: row['URL'] || row['Url'] || row['url'] || row['Website'] || row['website'] || '',
-                infoText: row['Info Text'] || row['info text'] || row['info'] || row['notes'] || row['description'] || '',
-                collective: row['Collective'] || row['collective'] || row['COLLECTIVE'] || ''
+            // Helper to split lists in cells (commas or semicolons)
+            const splitList = (v) => {
+                if (!v) return [];
+                return v.toString().split(/[;,]+/).map(s => s.trim()).filter(Boolean);
             };
 
-            // If headers didn't match exact cases above, also try matching via lowercase header map
-            // This ensures robustness for different header spellings
-            for (const hKey in row) {
-                const low = hKey.toLowerCase();
-                if (!artistObj.firstName && /first/.test(low)) artistObj.firstName = row[hKey];
-                if (!artistObj.artistName && /artist/.test(low) && !/first/.test(low)) artistObj.artistName = row[hKey];
-                if (!artistObj.genre && /genre/.test(low)) artistObj.genre = row[hKey];
-                if (!artistObj.location && /location|place|town|city/.test(low)) {
-                    if (!artistObj.location) artistObj.location = row[hKey];
-                    else if (!artistObj.location2) artistObj.location2 = row[hKey];
-                }
-                if (!artistObj.url && /url|website|site|link/.test(low)) artistObj.url = row[hKey];
-                if (!artistObj.infoText && /info|note|description|about/.test(low)) artistObj.infoText = row[hKey];
-                if (!artistObj.collective && /collective|group|band|crew/.test(low)) artistObj.collective = row[hKey];
+            // Normalize commonly used header names into our expected properties
+            const artistObj = {
+                // primary display name
+                artistName: row['Artist Name'] || row['artist name'] || row['artistname'] || row['artist'] || row['Artist'] || '',
+                // alternate person/name(s) list
+                names: splitList(row['Name(s)'] || row['Name'] || row['name(s)'] || row['name'] || ''),
+                // Type: producers, djs, both, other
+                rawType: row['Type'] || row['type'] || '',
+                // genre/subgenre
+                genre: row['Genre'] || row['genre'] || '',
+                subgenre: row['Subgenre'] || row['subgenre'] || '',
+                // locations may be multiple
+                locations: splitList(row['Location(s)'] || row['Location(s)'] || row['locations'] || row['Location'] || row['location'] || ''),
+                url: row['URL'] || row['Url'] || row['url'] || row['Website'] || row['website'] || '',
+                infoText: row['Info Text'] || row['info text'] || row['info'] || row['notes'] || row['description'] || '',
+                collectives: splitList(row['Collective(s)'] || row['Collective'] || row['collective'] || '')
+            };
+
+            // Backwards-compatible fields
+            artistObj.firstName = artistObj.names.length > 0 ? artistObj.names[0] : (row['First Name'] || row['first name'] || row['firstname'] || '');
+            artistObj.location = artistObj.locations[0] || (row['Location'] || row['location'] || '');
+            artistObj.location2 = artistObj.locations[1] || (row['Location 2'] || row['location 2'] || '');
+            artistObj.collective = artistObj.collectives.join(', ');
+
+            // Normalize the type into one of the canonical values
+            const t = (artistObj.rawType || '').toString().trim().toLowerCase();
+            if (!t) {
+                artistObj.type = 'other';
+            } else if ((t.includes('prod') || t.includes('producer')) && t.includes('dj')) {
+                // contains both producer and dj
+                artistObj.type = 'both';
+            } else if (t === 'both' || t.includes('both')) {
+                artistObj.type = 'both';
+            } else if (t.includes('prod') || t.includes('producer')) {
+                artistObj.type = 'producers';
+            } else if (t.includes('dj')) {
+                artistObj.type = 'djs';
+            } else {
+                artistObj.type = 'other';
             }
 
-            // Trim values
-            Object.keys(artistObj).forEach(k => { if (typeof artistObj[k] === 'string') artistObj[k] = artistObj[k].trim(); });
+            artistObj.contactFor = '';
 
-            // Only include rows that have at least a first name or artist name
-            if ((artistObj.firstName && artistObj.firstName.length > 0) || (artistObj.artistName && artistObj.artistName.length > 0)) {
+            // Fallback: try lowercased header detection for any missing fields
+            for (const hKey in row) {
+                const low = hKey.toLowerCase();
+                const val = row[hKey];
+                if (!artistObj.artistName && /artist/.test(low) && !/first/.test(low)) artistObj.artistName = val;
+                if ((!artistObj.firstName || artistObj.firstName === '') && /first/.test(low)) artistObj.firstName = val;
+                if (!artistObj.genre && /genre/.test(low)) artistObj.genre = val;
+                if ((!artistObj.locations || artistObj.locations.length === 0) && /location|place|town|city/.test(low)) artistObj.locations = (val ? val.toString().split(/[;,]+/).map(s=>s.trim()).filter(Boolean) : []);
+                if (!artistObj.url && /url|website|site|link/.test(low)) artistObj.url = val;
+                if (!artistObj.infoText && /info|note|description|about/.test(low)) artistObj.infoText = val;
+                if ((!artistObj.collectives || artistObj.collectives.length === 0) && /collective|group|band|crew/.test(low)) artistObj.collectives = (val ? val.toString().split(/[;,]+/).map(s=>s.trim()).filter(Boolean) : []);
+                if (!artistObj.subgenre && /subgenre/.test(low)) artistObj.subgenre = val;
+                if ((!artistObj.names || artistObj.names.length === 0) && /name/.test(low)) artistObj.names = (val ? val.toString().split(/[;,]+/).map(s=>s.trim()).filter(Boolean) : []);
+                if (!artistObj.contactFor && /contact/.test(low) && /me/.test(low) && /for/.test(low)) {
+                    artistObj.contactFor = val;
+                }
+            }
+
+            // Trim string values
+            Object.keys(artistObj).forEach(k => {
+                if (typeof artistObj[k] === 'string') artistObj[k] = artistObj[k].trim();
+            });
+
+            // Require at least a display name
+            if ((artistObj.artistName && artistObj.artistName.length > 0) || (artistObj.firstName && artistObj.firstName.length > 0) || (artistObj.names && artistObj.names.length > 0)) {
                 artists.push(artistObj);
             }
         }
@@ -810,11 +938,11 @@ class MusicNetwork {
         const genres = new Set();
         const collectives = new Set();
         
-    console.log('Creating nodes for producers:', this.artists);
+    
         
         // Create artist nodes and collect unique locations/genres
         this.artists.forEach((artist, index) => {
-            console.log('Processing artist:', artist);
+            
 
             // Normalize possible field names
             const rawArtistName = (artist.artistName || artist['Artist Name'] || artist.name || '').toString().trim();
@@ -837,13 +965,28 @@ class MusicNetwork {
                     y = Math.random() * (containerRect.height * 0.7) + containerRect.height * 0.15;
                 }
 
-                const rawInfo = (artist.infoText || artist['Info Text'] || artist.description || '').toString();
-                const normalizedInfo = rawInfo.replace(/\s+/g, '').toLowerCase();
-                const nodeType = normalizedInfo === 'dj' && artistLabel ? 'dj' : 'artist';
+                // Determine node types based on the new 'type' column. We keep an array of types
+                // for flexibility (e.g., 'both' -> ['artist','dj']). The primary `type` field is kept for
+                // compatibility but `types` contains canonical role names used for visibility checks.
+                const rawType = (artist.type || artist.rawType || '').toString().trim().toLowerCase();
+                const types = [];
+                if (rawType === 'both') {
+                    types.push('artist', 'dj');
+                } else if (rawType === 'producers' || rawType === 'producer' || rawType.includes('prod')) {
+                    types.push('artist');
+                } else if (rawType === 'djs' || rawType === 'dj' || rawType.includes('dj')) {
+                    types.push('dj');
+                } else {
+                    // unknown/other: treat as 'artist' for display but mark as 'other' too
+                    types.push('other');
+                }
+
+                const primaryType = types.includes('dj') && !types.includes('artist') ? 'dj' : (types.includes('artist') && !types.includes('dj') ? 'artist' : (types.includes('artist') && types.includes('dj') ? 'both' : 'other'));
 
                 const node = {
                     id: `artist_${index}`,
-                    type: nodeType,
+                    type: primaryType,
+                    types: types, // array, e.g. ['artist','dj']
                     label: artistLabel,
                     data: artist,
                     x: x,
@@ -852,24 +995,27 @@ class MusicNetwork {
                     vy: 0
                 };
                 this.nodes.push(node);
-                console.log('Created node:', node);
+                
 
                 // Check various possible location field names
-                const location1 = (artist.location || artist.Location || artist['Location '] || '').toString().trim();
-                const location2 = (artist.location2 || artist['Location 2'] || artist['Location2'] || '').toString().trim();
-                const genre = (artist.genre || artist.Genre || '').toString().trim();
-                const collective = (artist.collective || artist.Collective || '').toString().trim();
+                // collect locations (may be multiple) and genres/collectives
+                const locs = (artist.locations && Array.isArray(artist.locations) && artist.locations.length > 0)
+                    ? artist.locations
+                    : [ (artist.location || artist.Location || artist['Location '] || '').toString().trim() ].filter(Boolean);
 
-                if (location1) locations.add(location1);
-                if (location2) locations.add(location2);
+                locs.forEach(l => locations.add(l));
+
+                const genre = (artist.genre || artist.Genre || '').toString().trim();
                 if (genre) genres.add(genre);
+
                 // allow multiple collectives separated by commas or semicolons
-                if (collective) {
-                    const parts = collective.split(/[;,]+/).map(s => s.trim()).filter(Boolean);
-                    parts.forEach(p => collectives.add(p));
-                }
+                const collectiveList = (artist.collectives && artist.collectives.length > 0)
+                    ? artist.collectives
+                    : ((artist.collective || artist.Collective || '') ? (artist.collective || artist.Collective).toString().split(/[;,]+/).map(s=>s.trim()).filter(Boolean) : []);
+
+                collectiveList.forEach(c => collectives.add(c));
             } else {
-                console.log('Skipping artist - no valid name found:', artist);
+                
             }
         });
         
@@ -898,7 +1044,7 @@ class MusicNetwork {
                 vy: 0
             };
             this.nodes.push(node);
-            console.log('Created location node:', node);
+            
         });
         
         // Create genre nodes
@@ -926,7 +1072,7 @@ class MusicNetwork {
                 vy: 0
             };
             this.nodes.push(node);
-            console.log('Created genre node:', node);
+            
         });
         
         // Create collective nodes
@@ -954,73 +1100,71 @@ class MusicNetwork {
                 vy: 0
             };
             this.nodes.push(node);
-            console.log('Created collective node:', node);
+            
         });
         
-    console.log('Total nodes created:', this.nodes.length, ' (producers:', this.nodes.filter(n=>n.type==='artist').length, ', locations:', this.nodes.filter(n=>n.type==='location').length, ', genres:', this.nodes.filter(n=>n.type==='genre').length, ', collectives:', this.nodes.filter(n=>n.type==='collective').length, ')');
+    
     }
     
     createConnections() {
         this.connections = [];
         
         this.nodes.forEach(node => {
-            if (node.type === 'artist' || node.type === 'dj') {
+                if (node.types && (node.types.includes('artist') || node.types.includes('dj') || node.types.includes('other'))) {
                 const artist = node.data;
-                
-                // Get location and genre values with multiple possible field names
-                const location1 = artist.location || artist.Location || artist['Location '] || '';
-                const location2 = artist.location2 || artist['Location 2'] || artist['Location2'] || '';
-                const genre = artist.genre || artist.Genre || '';
-                const collective = artist.collective || artist.Collective || '';
-                const collectiveList = (collective || '').toString().split(/[;,]+/).map(s => s.trim()).filter(Boolean);
-                
+
+                // Locations (may be multiple)
+                const locs = (artist.locations && artist.locations.length > 0)
+                    ? artist.locations
+                    : [ (artist.location || artist.Location || artist['Location '] || '') ].filter(Boolean);
+
                 // Connect to locations
-                this.nodes.forEach(locationNode => {
-                    if (locationNode.type === 'location') {
-                        if (locationNode.label === location1.trim() || locationNode.label === location2.trim()) {
-                            this.connections.push({
-                                from: node.id,
-                                to: locationNode.id,
-                                type: 'location'
+                if (locs.length > 0) {
+                    this.nodes.forEach(locationNode => {
+                        if (locationNode.type === 'location') {
+                            locs.forEach(loc => {
+                                if (!loc) return;
+                                if (locationNode.label === loc.trim()) {
+                                    this.connections.push({ from: node.id, to: locationNode.id, type: 'location' });
+                                }
                             });
                         }
-                    }
-                });
-                
+                    });
+                }
+
                 // Connect to genres
-                this.nodes.forEach(genreNode => {
-                    if (genreNode.type === 'genre' && genreNode.label === genre.trim()) {
-                        this.connections.push({
-                            from: node.id,
-                            to: genreNode.id,
-                            type: 'genre'
-                        });
-                    }
-                });
-                
+                const genre = (artist.genre || artist.Genre || '').toString().trim();
+                if (genre) {
+                    this.nodes.forEach(genreNode => {
+                        if (genreNode.type === 'genre' && genreNode.label === genre) {
+                            this.connections.push({ from: node.id, to: genreNode.id, type: 'genre' });
+                        }
+                    });
+                }
+
                 // Connect to collectives (support multiple collectives per artist)
+                const collectiveList = (artist.collectives && artist.collectives.length > 0)
+                    ? artist.collectives
+                    : ((artist.collective || artist.Collective || '') ? (artist.collective || artist.Collective).toString().split(/[;,]+/).map(s => s.trim()).filter(Boolean) : []);
+
                 if (collectiveList.length > 0) {
                     this.nodes.forEach(collectiveNode => {
                         if (collectiveNode.type !== 'collective') return;
                         if (collectiveList.includes(collectiveNode.label)) {
-                            this.connections.push({
-                                from: node.id,
-                                to: collectiveNode.id,
-                                type: 'collective'
-                            });
+                            this.connections.push({ from: node.id, to: collectiveNode.id, type: 'collective' });
                         }
                     });
                 }
             }
         });
         
-        console.log('Created connections:', this.connections.length);
-        // build quick lookup structures used by rendering and interaction helpers
+    // build quick lookup structures used by rendering and interaction helpers
         this.buildIndexes();
         this.applySearchFilter();
         if (this.activeView === 'list') {
             this.renderListView();
         }
+        
     }
 
     // Build in-memory indexes and object references to avoid repeated .find() calls
@@ -1033,9 +1177,32 @@ class MusicNetwork {
         }));
     }
 
+    
+
+    // Determine whether a node should be treated as a person/artist-like node
+    isPersonNode(node) {
+        if (!node) return false;
+        // If node carries raw row data, prefer that as indication it's a person
+        if (node.data) {
+            // If explicit types exist, consider artist/dj/both/other as person-like
+            if (Array.isArray(node.types) && node.types.some(t => ['artist','dj','other'].includes(t))) return true;
+            if (['artist','dj','both','other'].includes(node.type)) return true;
+            // Fallback: if the data contains name fields, treat as person
+            const art = node.data;
+            if ((art.artistName && String(art.artistName).trim()) || (art.firstName && String(art.firstName).trim()) || (Array.isArray(art.names) && art.names.length > 0)) return true;
+        }
+        return false;
+    }
+
     isNodeVisible(node) {
         if (!node) return false;
-        const typeVisible = this.visibleTypes.hasOwnProperty(node.type) ? this.visibleTypes[node.type] : true;
+        // Support nodes that carry multiple role types (e.g., types: ['artist','dj'])
+        let typeVisible = true;
+        if (node.types && Array.isArray(node.types) && node.types.length > 0) {
+            typeVisible = node.types.some(t => this.visibleTypes.hasOwnProperty(t) ? this.visibleTypes[t] : true);
+        } else {
+            typeVisible = this.visibleTypes.hasOwnProperty(node.type) ? this.visibleTypes[node.type] : true;
+        }
         const searchActive = !!this.searchTerm;
 
         if (!searchActive) {
@@ -1067,7 +1234,8 @@ class MusicNetwork {
         const parts = [];
         if (!node) return parts;
         if (node.label) parts.push(String(node.label).toLowerCase());
-        if ((node.type === 'artist' || node.type === 'dj') && node.data) {
+        const hasArtistLike = this.isPersonNode(node);
+        if (hasArtistLike && node.data) {
             Object.values(node.data).forEach((val) => {
                 if (typeof val === 'string' && val.trim()) {
                     parts.push(val.toLowerCase());
@@ -1159,10 +1327,11 @@ class MusicNetwork {
         const container = this.nodeListElement;
         container.innerHTML = '';
 
-        const typeOrder = ['artist', 'dj', 'location', 'genre', 'collective'];
+        const typeOrder = ['artist', 'dj', 'other', 'location', 'genre', 'collective'];
         const typeLabels = {
             artist: 'producers',
             dj: 'djs',
+            other: 'other',
             location: 'locations',
             genre: 'genres',
             collective: 'collectives'
@@ -1370,6 +1539,7 @@ class MusicNetwork {
         } else {
             setTimeout(syncCanvas, 0);
         }
+        
     }
 
     refreshLegendToggleUI(isMobile) {
@@ -1382,6 +1552,37 @@ class MusicNetwork {
         } else {
             this.legendToggleButton.textContent = 'filters';
             this.legendToggleButton.setAttribute('aria-expanded', 'true');
+        }
+
+        // On mobile, keep the search input hidden/disabled when legend is collapsed
+        try {
+            const searchWrapper = document.querySelector('#controls .search-wrapper');
+            const searchInput = document.getElementById('node-search');
+            if (isMobile && searchWrapper) {
+                if (this.legendCollapsed) {
+                    searchWrapper.setAttribute('aria-hidden', 'true');
+                    if (searchInput) {
+                        searchInput.disabled = true;
+                        searchInput.setAttribute('aria-hidden', 'true');
+                        searchInput.tabIndex = -1;
+                    }
+                } else {
+                    searchWrapper.setAttribute('aria-hidden', 'false');
+                    if (searchInput) {
+                        searchInput.disabled = false;
+                        searchInput.removeAttribute('aria-hidden');
+                        searchInput.tabIndex = 0;
+                    }
+                }
+            } else if (searchWrapper && searchInput) {
+                // non-mobile: ensure search is available
+                searchWrapper.removeAttribute('aria-hidden');
+                searchInput.disabled = false;
+                searchInput.removeAttribute('aria-hidden');
+                searchInput.tabIndex = 0;
+            }
+        } catch (e) {
+            // defensive: don't break UI if something unexpected occurs
         }
     }
 
@@ -1419,10 +1620,13 @@ class MusicNetwork {
         const degValues = Object.values(degree);
         const maxDeg = degValues.length ? Math.max(...degValues) : 1;
 
-        const rect = this.canvas.getBoundingClientRect();
-        const centerX = rect.width / 2;
-        const centerY = rect.height / 2;
-        const baseRadius = Math.min(rect.width, rect.height) * 0.35; // main placement radius
+    const rect = this.canvas.getBoundingClientRect();
+    const centerX = rect.width / 2;
+    const centerY = rect.height / 2;
+    // Use separate radii for X and Y so the static layout fills the canvas aspect
+    // ratio instead of forcing a circular (square-limited) placement.
+    const baseRadiusX = Math.max(50, rect.width * 0.45);
+    const baseRadiusY = Math.max(50, rect.height * 0.45);
 
         // sort nodes so we can give deterministic-ish placement for equal-degree nodes
         const nodesSorted = [...this.nodes].sort((a, b) => (degree[b.id] || 0) - (degree[a.id] || 0));
@@ -1434,27 +1638,25 @@ class MusicNetwork {
             // normalized centrality: 0..1 (1 = most connected)
             const centrality = deg / Math.max(maxDeg, 1);
 
-            // radial distance: nodes with higher centrality closer to center
-            // add a slight random jitter to avoid perfect rings
-            const r = baseRadius * (1 - 0.7 * centrality) * (0.75 + Math.random() * 0.5);
+            // radial distances for X and Y separately so layout spans the full rectangle
+            const rX = baseRadiusX * (1 - 0.7 * centrality) * (0.75 + Math.random() * 0.5);
+            const rY = baseRadiusY * (1 - 0.7 * centrality) * (0.75 + Math.random() * 0.5);
 
-            // angle distribution around circle; scatter jitter to avoid lattice
+            // angle distribution around ellipse; scatter jitter to avoid lattice
             const angle = (i / nodesSorted.length) * Math.PI * 2 + (Math.random() - 0.5) * 0.6;
 
-            node.x = centerX + Math.cos(angle) * r;
-            node.y = centerY + Math.sin(angle) * r;
+            node.x = centerX + Math.cos(angle) * rX;
+            node.y = centerY + Math.sin(angle) * rY;
             node.vx = 0;
             node.vy = 0;
         }
 
         // rebuild indexes used by render and other algorithms
-        this.buildIndexes();
-        console.log('Static layout applied:', { nodes: this.nodes.length, maxDeg, baseRadius });
+    this.buildIndexes();
     }
     
     centerView() {
         if (this.nodes.length === 0) {
-            console.log('No nodes to center');
             return;
         }
         
@@ -1465,26 +1667,19 @@ class MusicNetwork {
         const centerY = (bounds.minY + bounds.maxY) / 2;
         
     const isMobile = window.innerWidth <= 768;
-    // On mobile, start noticeably zoomed in so text is more readable and users can pan around
-    const mobileScale = 2.0;
+    // On mobile, apply a slightly elevated base scale so text stays legible without excessive zoom.
+    const mobileScale = this.mobileDefaultCenterScale || 1.6;
     this.scale = isMobile ? mobileScale : 1;
 
     // compute offsets so the graph center is visible in the canvas center
     this.offsetX = containerRect.width / 2 - centerX * this.scale;
     this.offsetY = containerRect.height / 2 - centerY * this.scale;
         
-        console.log('Centered view:', { 
-            centerX, centerY, 
-            offsetX: this.offsetX, 
-            offsetY: this.offsetY,
-            canvasSize: { width: containerRect.width, height: containerRect.height }
-        });
     }
 
     // Scale and offset the graph to fill the available canvas with appropriate margins
     fitToScreen() {
         if (this.nodes.length === 0) {
-            console.log('No nodes to fit');
             return;
         }
         
@@ -1495,30 +1690,43 @@ class MusicNetwork {
         const graphWidth = bounds.maxX - bounds.minX;
         const graphHeight = bounds.maxY - bounds.minY;
         
-        // desired margins (pixels in canvas space)
-        const margin = 80;
-        const availableWidth = containerRect.width - 2 * margin;
-        const availableHeight = containerRect.height - 2 * margin;
+    // desired margins (pixels in canvas space)
+        const availableWidth = containerRect.width - 2 * 80; // default, may adjust for desktop below
+        const availableHeight = containerRect.height - 2 * 80;
         
+        // Apply user's preferred initial zoom multiplier (e.g., 4x) but only on mobile
+        const isMobile = window.innerWidth <= 768;
+    // increase margin on desktop (reduce slightly to allow a more expanded default view)
+    const margin = isMobile ? 80 : 100; // smaller desktop margin so the graph appears more expanded
+    // By default, limit available width/height to container minus margins. On desktop,
+    // allow the "available" graph area to be twice the visible viewport so users can
+    // pan into more expansion space. This effectively gives more room for the layout
+    // and results in a more zoomed-in default view while preserving mobile behavior.
+    let finalAvailableWidth = containerRect.width - 2 * margin;
+    let finalAvailableHeight = containerRect.height - 2 * margin;
+    if (!isMobile) {
+        finalAvailableWidth = Math.max(finalAvailableWidth, containerRect.width * 2 - 2 * margin);
+        finalAvailableHeight = Math.max(finalAvailableHeight, containerRect.height * 2 - 2 * margin);
+    }
+
         // compute scale to fit graph in available space (with some breathing room)
         let scale = 1;
         if (graphWidth > 0 && graphHeight > 0) {
-            const scaleX = availableWidth / graphWidth;
-            const scaleY = availableHeight / graphHeight;
+            const scaleX = finalAvailableWidth / graphWidth;
+            const scaleY = finalAvailableHeight / graphHeight;
             scale = Math.min(scaleX, scaleY, 1.2); // cap max scale at 1.2 to avoid over-zooming small graphs
             scale = Math.max(scale, 0.3); // ensure minimum scale so graph doesn't get too tiny
         }
 
-        // Apply user's preferred initial zoom multiplier (e.g., 4x) but only on mobile
-        const isMobile = window.innerWidth <= 768;
-        const multiplier = (isMobile && this.initialZoomMultiplier) ? this.initialZoomMultiplier : 1;
+        // Determine multiplier: mobile uses the large initialZoomMultiplier, desktop uses a stronger desktopInitialZoomMultiplier
+        const multiplier = isMobile ? (this.initialZoomMultiplier || 1) : (this.desktopInitialZoomMultiplier || this.desktopExpandMultiplier || 1);
         if (multiplier && multiplier > 1) {
             scale = scale * multiplier;
             // hard cap to avoid insane zooms
             scale = Math.min(scale, 8);
         }
         
-        // compute center of graph in original coords
+    // compute center of graph in original coords
         const centerX = (bounds.minX + bounds.maxX) / 2;
         const centerY = (bounds.minY + bounds.maxY) / 2;
         
@@ -1527,13 +1735,6 @@ class MusicNetwork {
         this.offsetY = containerRect.height / 2 - centerY * scale;
         this.scale = scale;
         
-        console.log('Fit to screen:', { 
-            graphWidth, graphHeight,
-            scale: this.scale,
-            offsetX: this.offsetX, 
-            offsetY: this.offsetY,
-            canvasSize: { width: containerRect.width, height: containerRect.height }
-        });
     }
     
     getBounds() {
@@ -1562,105 +1763,259 @@ class MusicNetwork {
         if (this.legacyStyle) {
             // Original drawing style (keeps your original look)
             // connection lines: muted neon green (slightly more saturated)
-            // slightly more contrasty but still light lines for overview
+            // Slightly more contrasty but still light lines for overview
             this.ctx.lineWidth = 1;
-            // stronger opacity for readability
-            this.ctx.strokeStyle = 'rgba(0,255,0,0.55)';
-            for (const cref of this.connectionRefs) {
-                if (!this.shouldRenderConnection(cref)) continue;
-                this.ctx.beginPath();
-                this.ctx.moveTo(cref.from.x, cref.from.y);
-                this.ctx.lineTo(cref.to.x, cref.to.y);
-                this.ctx.stroke();
+            const baseConnAlpha = 0.55;
+            // If hover is active, draw connections with related edges emphasized
+            if (this.hoverProgress > 0) {
+                    // draw edges: related edges keep original color, others are darkened but keep strength
+                    const baseGreen = '#00ff00';
+                    for (const cref of this.connectionRefs) {
+                        if (!this.shouldRenderConnection(cref)) continue;
+                        const key = `${cref.from.id}::${cref.to.id}`;
+                        const isRelated = this.hoverConnectedEdges && this.hoverConnectedEdges.has(key);
+                        this.ctx.beginPath();
+                        this.ctx.moveTo(cref.from.x, cref.from.y);
+                        this.ctx.lineTo(cref.to.x, cref.to.y);
+                        if (isRelated) {
+                            this.ctx.strokeStyle = baseGreen;
+                        } else {
+                            const dark = this._darkenColor(baseGreen, 0.9 * this.hoverProgress);
+                            this.ctx.strokeStyle = dark;
+                        }
+                        this.ctx.stroke();
+                    }
+
+                // Draw non-related nodes first: keep labels visible but darken color
+                this.nodes.forEach(node => {
+                    if (!this.isNodeVisible(node)) return;
+                    if (this.hoverConnectedNodes && this.hoverConnectedNodes.has(node.id)) return; // skip related
+                    const drawKey = this._computeDrawKeyForNode(node);
+                    const nodeType = this.nodeTypes[drawKey] || this.nodeTypes[node.type] || { color: '#888', radius: 6 };
+                    const darkFill = this._darkenColor(nodeType.color, 0.9 * this.hoverProgress);
+                    // draw circle with darkened color
+                    this.ctx.fillStyle = darkFill;
+                    this.ctx.beginPath();
+                    this.ctx.arc(node.x, node.y, nodeType.radius, 0, Math.PI * 2);
+                    this.ctx.fill();
+                    // border darkened
+                    this.ctx.strokeStyle = this._darkenColor(nodeType.color, 0.95 * this.hoverProgress);
+                    this.ctx.lineWidth = 1;
+                    this.ctx.stroke();
+                    // label remains visible but darker
+                    const label = String(node.label || '').slice(0, 36);
+                    this.ctx.font = '12px Courier New, monospace';
+                    const metrics = this.ctx.measureText(label);
+                    const pad = 8;
+                    const labelX = node.x;
+                    const labelY = node.y + nodeType.radius + 16;
+                    this.ctx.fillStyle = this._darkenColor(this.mutedLabelColor[drawKey] || this.mutedLabelColor[node.type] || '#999999', 0.99 * this.hoverProgress);
+                    this.ctx.textAlign = 'center';
+                    this.ctx.fillText(label, labelX, labelY);
+                });
+
+                // Finally draw related nodes (ensure they are on top) with labels
+                this.nodes.forEach(node => {
+                    if (!this.isNodeVisible(node)) return;
+                    if (!(this.hoverConnectedNodes && this.hoverConnectedNodes.has(node.id))) return;
+                    const drawKey = this._computeDrawKeyForNode(node);
+                    const nodeType = this.nodeTypes[drawKey] || this.nodeTypes[node.type] || { color: '#888', radius: 6 };
+                    // Draw node circle
+                    this.ctx.fillStyle = nodeType.color;
+                    this.ctx.beginPath();
+                    this.ctx.arc(node.x, node.y, nodeType.radius, 0, Math.PI * 2);
+                    this.ctx.fill();
+                    // Border
+                    this.ctx.strokeStyle = nodeType.color;
+                    this.ctx.lineWidth = 1;
+                    this.ctx.stroke();
+                    // Label
+                    const label = String(node.label || '').slice(0, 36);
+                    this.ctx.font = '12px Courier New, monospace';
+                    const metrics = this.ctx.measureText(label);
+                    const pad = 8;
+                    const labelX = node.x;
+                    const labelY = node.y + nodeType.radius + 16;
+                    this.ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+                    this.ctx.fillRect(labelX - metrics.width / 2 - pad/2, labelY - 12, metrics.width + pad, 16);
+                    this.ctx.fillStyle = this.mutedLabelColor[drawKey] || this.mutedLabelColor[node.type] || '#999999';
+                    this.ctx.textAlign = 'center';
+                    this.ctx.fillText(label, labelX, labelY);
+                });
+            } else {
+                // No hover: regular drawing
+                for (const cref of this.connectionRefs) {
+                    if (!this.shouldRenderConnection(cref)) continue;
+                    this.ctx.beginPath();
+                    this.ctx.moveTo(cref.from.x, cref.from.y);
+                    this.ctx.lineTo(cref.to.x, cref.to.y);
+                    this.ctx.globalAlpha = baseConnAlpha;
+                    this.ctx.strokeStyle = 'rgba(0,255,0,1)';
+                    this.ctx.stroke();
+                }
+                this.ctx.globalAlpha = 1;
+
+                this.nodes.forEach(node => {
+                    if (!this.isNodeVisible(node)) return; // skip hidden types
+                    const drawKey = this._computeDrawKeyForNode(node);
+                    const nodeType = this.nodeTypes[drawKey] || this.nodeTypes[node.type] || { color: '#888', radius: 6 };
+                    // Draw node circle
+                    this.ctx.fillStyle = nodeType.color;
+                    this.ctx.beginPath();
+                    this.ctx.arc(node.x, node.y, nodeType.radius, 0, Math.PI * 2);
+                    this.ctx.fill();
+                    // Draw node border
+                    this.ctx.strokeStyle = nodeType.color;
+                    this.ctx.lineWidth = 1;
+                    this.ctx.stroke();
+                    // Draw label
+                    const label = String(node.label || '').slice(0, 36);
+                    this.ctx.font = '12px Courier New, monospace';
+                    const metrics = this.ctx.measureText(label);
+                    const pad = 8;
+                    const labelX = node.x;
+                    const labelY = node.y + nodeType.radius + 16;
+                    this.ctx.fillStyle = 'rgba(0, 0, 0, 0.7)'; // Semi-transparent black background
+                    this.ctx.fillRect(labelX - metrics.width / 2 - pad/2, labelY - 12, metrics.width + pad, 16);
+                    this.ctx.fillStyle = this.mutedLabelColor[drawKey] || this.mutedLabelColor[node.type] || '#999999';
+                    this.ctx.textAlign = 'center';
+                    this.ctx.fillText(label, labelX, labelY);
+                });
             }
-
-            this.nodes.forEach(node => {
-                if (!this.isNodeVisible(node)) return; // skip hidden types
-                const nodeType = this.nodeTypes[node.type];
-
-                // Draw node circle
-                this.ctx.fillStyle = nodeType.color;
-                this.ctx.beginPath();
-                this.ctx.arc(node.x, node.y, nodeType.radius, 0, Math.PI * 2);
-                this.ctx.fill();
-
-                // Draw node border for better visibility
-                this.ctx.strokeStyle = nodeType.color;
-                this.ctx.lineWidth = 1;
-                this.ctx.stroke();
-
-                // Draw label with larger font for readability
-                const label = String(node.label || '').slice(0, 36);
-                this.ctx.font = '12px Courier New, monospace';
-                const metrics = this.ctx.measureText(label);
-                const pad = 8;
-                const labelX = node.x;
-                const labelY = node.y + nodeType.radius + 16;
-                this.ctx.fillStyle = 'rgba(0, 0, 0, 0.7)'; // Semi-transparent black background
-                this.ctx.fillRect(labelX - metrics.width / 2 - pad/2, labelY - 12, metrics.width + pad, 16);
-
-                this.ctx.fillStyle = this.mutedLabelColor[node.type] || '#999999';
-                this.ctx.textAlign = 'center';
-                this.ctx.fillText(label, labelX, labelY);
-            });
         } else {
             // Enhanced visuals (alternate mode)
             // use muted neon green for connection lines to match original distribution
             // lighter lines in enhanced mode
             this.ctx.lineWidth = 1;
-            // stronger opacity in enhanced mode as well
-            this.ctx.strokeStyle = 'rgba(0,255,0,0.60)';
-            for (const cref of this.connectionRefs) {
-                if (!this.shouldRenderConnection(cref)) continue;
-                this.ctx.beginPath();
-                this.ctx.moveTo(cref.from.x, cref.from.y);
-                this.ctx.lineTo(cref.to.x, cref.to.y);
-                this.ctx.stroke();
+            const baseConnAlpha = 0.6;
+            if (this.hoverProgress > 0) {
+                // draw edges with darkened color for non-related edges
+                const baseGreen = '#00ff00';
+                for (const cref of this.connectionRefs) {
+                    if (!this.shouldRenderConnection(cref)) continue;
+                    const key = `${cref.from.id}::${cref.to.id}`;
+                    const isRelated = this.hoverConnectedEdges && this.hoverConnectedEdges.has(key);
+                    this.ctx.beginPath();
+                    this.ctx.moveTo(cref.from.x, cref.from.y);
+                    this.ctx.lineTo(cref.to.x, cref.to.y);
+                    if (isRelated) {
+                        this.ctx.strokeStyle = baseGreen;
+                    } else {
+                        this.ctx.strokeStyle = this._darkenColor(baseGreen, 0.9 * this.hoverProgress);
+                    }
+                    this.ctx.stroke();
+                }
+
+                // non-related nodes: draw them darker but keep labels visible
+                this.nodes.forEach(node => {
+                    if (!this.isNodeVisible(node)) return;
+                    if (this.hoverConnectedNodes && this.hoverConnectedNodes.has(node.id)) return;
+                    const drawKey = this._computeDrawKeyForNode(node);
+                    const nodeType = this.nodeTypes[drawKey] || this.nodeTypes[node.type] || { color: '#888', radius: 6 };
+                    const darkFill = this._darkenColor(nodeType.color, 0.9 * this.hoverProgress);
+                    this.ctx.beginPath();
+                    this.ctx.fillStyle = darkFill;
+                    this.ctx.arc(node.x, node.y, nodeType.radius, 0, Math.PI * 2);
+                    this.ctx.fill();
+                    // subtle halo (darkened)
+                    this.ctx.beginPath();
+                    this.ctx.strokeStyle = this._darkenColor(nodeType.color, 0.95 * this.hoverProgress);
+                    this.ctx.lineWidth = 6;
+                    this.ctx.arc(node.x, node.y, nodeType.radius + 3, 0, Math.PI * 2);
+                    this.ctx.stroke();
+                    // label remains visible but darker
+                    const label = String(node.label || '').slice(0, 36);
+                    const labelX = node.x;
+                    const labelY = node.y + nodeType.radius + 16;
+                    const metrics = this.ctx.measureText(label);
+                    const pad = 6;
+                    this.ctx.fillStyle = 'rgba(0,0,0,0.5)';
+                    this.ctx.fillRect(labelX - metrics.width / 2 - pad/2, labelY - 11, metrics.width + pad, 14);
+                    this.ctx.fillStyle = this._darkenColor(this.mutedLabelColor[drawKey] || this.mutedLabelColor[node.type] || '#cccccc', 0.99 * this.hoverProgress);
+                    this.ctx.fillText(label, labelX, labelY);
+                });
+
+                // draw related nodes on top with labels and halo
+                this.nodes.forEach(node => {
+                    if (!this.isNodeVisible(node)) return;
+                    if (!(this.hoverConnectedNodes && this.hoverConnectedNodes.has(node.id))) return;
+                    const drawKey = this._computeDrawKeyForNode(node);
+                    const nodeType = this.nodeTypes[drawKey] || this.nodeTypes[node.type] || { color: '#888', radius: 6 };
+                    this.ctx.beginPath();
+                    this.ctx.fillStyle = nodeType.color;
+                    this.ctx.arc(node.x, node.y, nodeType.radius, 0, Math.PI * 2);
+                    this.ctx.fill();
+                    this.ctx.beginPath();
+                    this.ctx.strokeStyle = nodeType.color;
+                    this.ctx.globalAlpha = 0.25;
+                    this.ctx.lineWidth = 6;
+                    this.ctx.arc(node.x, node.y, nodeType.radius + 3, 0, Math.PI * 2);
+                    this.ctx.stroke();
+                    this.ctx.globalAlpha = 1;
+                    // label
+                    const label = String(node.label || '').slice(0, 36);
+                    const labelX = node.x;
+                    const labelY = node.y + nodeType.radius + 16;
+                    const metrics = this.ctx.measureText(label);
+                    const pad = 6;
+                    this.ctx.fillStyle = 'rgba(0,0,0,0.5)';
+                    this.ctx.fillRect(labelX - metrics.width / 2 - pad/2, labelY - 11, metrics.width + pad, 14);
+                    this.ctx.fillStyle = this.mutedLabelColor[drawKey] || this.mutedLabelColor[node.type] || '#cccccc';
+                    this.ctx.fillText(label, labelX, labelY);
+                });
+            } else {
+                for (const cref of this.connectionRefs) {
+                    if (!this.shouldRenderConnection(cref)) continue;
+                    this.ctx.beginPath();
+                    this.ctx.moveTo(cref.from.x, cref.from.y);
+                    this.ctx.lineTo(cref.to.x, cref.to.y);
+                    this.ctx.stroke();
+                }
+
+                this.nodes.forEach(node => {
+                    if (!this.isNodeVisible(node)) return;
+                    const drawKey = this._computeDrawKeyForNode(node);
+                    const nodeType = this.nodeTypes[drawKey] || this.nodeTypes[node.type] || { color: '#888', radius: 6 };
+
+                    // Draw node with subtle halo for visibility
+                    this.ctx.beginPath();
+                    this.ctx.fillStyle = nodeType.color;
+                    this.ctx.arc(node.x, node.y, nodeType.radius, 0, Math.PI * 2);
+                    this.ctx.fill();
+
+                    // soft outer ring
+                    this.ctx.beginPath();
+                    this.ctx.strokeStyle = nodeType.color;
+                    this.ctx.globalAlpha = 0.25;
+                    this.ctx.lineWidth = 6;
+                    this.ctx.arc(node.x, node.y, nodeType.radius + 3, 0, Math.PI * 2);
+                    this.ctx.stroke();
+                    this.ctx.globalAlpha = 1;
+
+                    // label - offset vertically to avoid overlap; use muted color derived from node color
+                    this.ctx.font = '13px Courier New, monospace';
+                    this.ctx.textAlign = 'center';
+                    this.ctx.fillStyle = this.mutedLabelColor[drawKey] || this.mutedLabelColor[node.type] || '#cccccc';
+
+                    // Split long labels and clamp length
+                    const label = String(node.label || '').slice(0, 36);
+                    const labelX = node.x;
+                    const labelY = node.y + nodeType.radius + 16;
+                    // draw a subtle background for readability
+                    const metrics = this.ctx.measureText(label);
+                    const pad = 6;
+                    this.ctx.fillStyle = 'rgba(0,0,0,0.5)';
+                    this.ctx.fillRect(labelX - metrics.width / 2 - pad/2, labelY - 11, metrics.width + pad, 14);
+
+                    // draw text on top using same muted color
+                    this.ctx.fillStyle = this.mutedLabelColor[node.type] || '#cccccc';
+                    this.ctx.fillText(label, labelX, labelY);
+                });
             }
-
-            this.nodes.forEach(node => {
-                if (!this.isNodeVisible(node)) return;
-                const nodeType = this.nodeTypes[node.type];
-
-                // Draw node with subtle halo for visibility
-                this.ctx.beginPath();
-                this.ctx.fillStyle = nodeType.color;
-                this.ctx.arc(node.x, node.y, nodeType.radius, 0, Math.PI * 2);
-                this.ctx.fill();
-
-                // soft outer ring
-                this.ctx.beginPath();
-                this.ctx.strokeStyle = nodeType.color;
-                this.ctx.globalAlpha = 0.25;
-                this.ctx.lineWidth = 6;
-                this.ctx.arc(node.x, node.y, nodeType.radius + 3, 0, Math.PI * 2);
-                this.ctx.stroke();
-                this.ctx.globalAlpha = 1;
-
-                // label - offset vertically to avoid overlap; use muted color derived from node color
-                this.ctx.font = '13px Courier New, monospace';
-                this.ctx.textAlign = 'center';
-                this.ctx.fillStyle = this.mutedLabelColor[node.type] || '#cccccc';
-
-                // Split long labels and clamp length
-                const label = String(node.label || '').slice(0, 36);
-                const labelX = node.x;
-                const labelY = node.y + nodeType.radius + 16;
-                // draw a subtle background for readability
-                const metrics = this.ctx.measureText(label);
-                const pad = 6;
-                this.ctx.fillStyle = 'rgba(0,0,0,0.5)';
-                this.ctx.fillRect(labelX - metrics.width / 2 - pad/2, labelY - 11, metrics.width + pad, 14);
-
-                // draw text on top using same muted color
-                this.ctx.fillStyle = this.mutedLabelColor[node.type] || '#cccccc';
-                this.ctx.fillText(label, labelX, labelY);
-            });
         }
         
         this.ctx.restore();
         
-        console.log('Render complete. Offset:', this.offsetX, this.offsetY, 'Scale:', this.scale);
     }
     
     getMousePos(e) {
@@ -1686,13 +2041,94 @@ class MusicNetwork {
             const dx = node.x - pos.x;
             const dy = node.y - pos.y;
             const distance = Math.sqrt(dx * dx + dy * dy);
-            return distance <= this.nodeTypes[node.type].radius + 5;
+
+            // Resolve a safe radius for hit testing. Nodes may have a `types` array or a
+            // `type` value like 'both' which isn't a direct key in nodeTypes. Prefer any
+            // existing known type from node.types, otherwise fall back to node.type if present
+            // in nodeTypes, and finally default to 'artist' radius for compatibility.
+            const candidateKeys = Array.isArray(node.types) && node.types.length > 0 ? node.types.slice() : [];
+            if (node.type) candidateKeys.push(node.type);
+            let radius = null;
+            for (const k of candidateKeys) {
+                if (k && this.nodeTypes[k]) { radius = this.nodeTypes[k].radius; break; }
+            }
+            if (radius === null) radius = (this.nodeTypes.artist && this.nodeTypes.artist.radius) || 8;
+
+            return distance <= radius + 5;
         });
+    }
+
+    // internal: clear hover timer & candidate without changing active hover state
+    _clearHoverCandidate() {
+        if (this._hoverTimer) {
+            clearTimeout(this._hoverTimer);
+            this._hoverTimer = null;
+        }
+        this._hoverCandidate = null;
+    }
+
+    _activateHover(node) {
+        if (!node) return;
+        // build connected node set and edge keys
+        this.hoverNode = node;
+        this.hoverConnectedNodes = new Set([node.id]);
+        this.hoverConnectedEdges = new Set();
+        this.connectionRefs.forEach((cref, idx) => {
+            if (!cref || !cref.from || !cref.to) return;
+            if (cref.from.id === node.id || cref.to.id === node.id) {
+                // add neighbor
+                this.hoverConnectedNodes.add(cref.from.id);
+                this.hoverConnectedNodes.add(cref.to.id);
+                this.hoverConnectedEdges.add(`${cref.from.id}::${cref.to.id}`);
+            }
+        });
+        this.hoverActive = true;
+        // Immediately set hover progress to fully active (no animation)
+        if (this._hoverAnimFrame) cancelAnimationFrame(this._hoverAnimFrame);
+        this.hoverProgress = 1;
+        this.render();
+    }
+
+    _deactivateHover() {
+        // Immediately deactivate hover (no animation)
+        if (this._hoverAnimFrame) cancelAnimationFrame(this._hoverAnimFrame);
+        this.hoverProgress = 0;
+        this.hoverActive = false;
+        this.hoverNode = null;
+        this.hoverConnectedNodes = new Set();
+        this.hoverConnectedEdges = new Set();
+        this.render();
+    }
+
+    _startHoverAnimation(target, duration = 150, cb) {
+        // Animations have been disabled: set the target state immediately.
+        if (this._hoverAnimFrame) cancelAnimationFrame(this._hoverAnimFrame);
+        this.hoverProgress = target ? 1 : 0;
+        this.render();
+        if (cb) cb();
+    }
+
+    // compute the draw key for a node (used by render and for debug reporting)
+    _computeDrawKeyForNode(n) {
+        if (!n) return 'other';
+        if (n.types && Array.isArray(n.types) && n.types.includes('artist') && n.types.includes('dj')) {
+            if (this.visibleTypes.dj && !this.visibleTypes.artist) return 'dj';
+            return 'artist';
+        }
+        if (n.types && n.types.includes('dj')) return 'dj';
+        if (n.types && n.types.includes('artist')) return 'artist';
+        if (n.type && this.nodeTypes[n.type]) return n.type;
+        return 'other';
     }
 
     handleMouseDown(e) {
         const pos = this.getMousePos(e);
         const node = this.getNodeAt(pos);
+
+    // Suppress automatic layout runs for a short window after a direct mouse interaction
+    // This prevents an apparent 'reload' of the layout when the user clicks the network.
+    // Increase window to 3s to be defensive while we trace the caller that triggers runLayout.
+    this._suppressRunLayoutUntil = Date.now() + 3000; // suppress for 3 seconds
 
         if (node) {
             // Start dragging a node (allow dragging all types)
@@ -1707,6 +2143,8 @@ class MusicNetwork {
             this._mouseDownPos = { x: pos.x, y: pos.y };
             this._mouseStartNodePos = { x: node.x, y: node.y };
             // Do not open modal on immediate mousedown; use click/tap release to open
+            // record last clicked candidate for debug purposes
+            this.lastClickedCandidate = { id: node.id, types: node.types, type: node.type, label: node.label };
         } else {
             // Start panning
             // user is interacting -> stop auto-centering temporarily
@@ -1728,6 +2166,37 @@ class MusicNetwork {
             this.offsetX = e.clientX - this.dragStart.x;
             this.offsetY = e.clientY - this.dragStart.y;
             this.render();
+            // While panning, cancel any pending hover
+            this._clearHoverCandidate();
+            return;
+        }
+
+        // Hover handling (desktop only, when not dragging) — only active while Meta/Windows key is pressed
+        const isMobile = window.innerWidth <= 768;
+        if (!isMobile && !this.nodeDragging && !this.isDragging) {
+            if (e && !e.metaKey) {
+                // meta key not held: clear any candidate and deactivate hover if active
+                this._clearHoverCandidate();
+                if (this.hoverActive) this._deactivateHover();
+            } else if (e && e.metaKey) {
+                const hit = this.getNodeAt(pos);
+                if (hit) {
+                    // If moved over a new candidate, activate immediately (no delay)
+                    if (!this._hoverCandidate || this._hoverCandidate.id !== hit.id) {
+                        this._hoverCandidate = hit;
+                        if (this._hoverTimer) { clearTimeout(this._hoverTimer); this._hoverTimer = null; }
+                        // Activate hover immediately (remove debounce/delay)
+                        this._activateHover(hit);
+                    }
+                } else {
+                    // not over any node — clear candidate and schedule deactivation
+                    this._clearHoverCandidate();
+                    if (this.hoverActive) {
+                        // deactivate quickly
+                        this._deactivateHover();
+                    }
+                }
+            }
         }
     }
     
@@ -1743,7 +2212,10 @@ class MusicNetwork {
             const moved = Math.sqrt(dx*dx + dy*dy) > 6; // slightly lower threshold for responsiveness
             if (!moved) {
                 // It was a click (no significant movement)
-                if (node.type === 'artist' || node.type === 'dj') this.showArtistModal(node.data);
+                const nodeIsArtistLike = this.isPersonNode(node);
+                // store lastClicked info
+                this.lastClicked = { id: node.id, types: node.types, type: node.type, label: node.label, isArtistLike: nodeIsArtistLike, drawKey: this._computeDrawKeyForNode(node) };
+                if (nodeIsArtistLike) this.showArtistModal(node.data);
                 else this.showGroupModal(node);
             }
         }
@@ -1757,6 +2229,15 @@ class MusicNetwork {
 
     // helper to show a group modal (for location or genre) listing matching producers
     showGroupModal(node) {
+        // Save current view state before opening modal to restore later
+        this._savedViewState = {
+            scale: this.scale,
+            offsetX: this.offsetX,
+            offsetY: this.offsetY
+        };
+
+        this._modalOpen = true;
+        
         const label = node.label || '';
         const type = node.type; // 'location' or 'genre'
         const title = `${label} — ${type}`;
@@ -1764,7 +2245,7 @@ class MusicNetwork {
     // find producers related to this node via connections (preferred)
         this.buildIndexes();
         let matches = this.connectionRefs
-            .filter(cref => cref.to && cref.to.id === node.id && cref.from && (cref.from.type === 'artist' || cref.from.type === 'dj'))
+            .filter(cref => cref.to && cref.to.id === node.id && cref.from && this.isPersonNode(cref.from))
             .map(cref => cref.from);
 
         // fallback to data-field matching if no connections found
@@ -1774,13 +2255,15 @@ class MusicNetwork {
                 const genre = (art.genre || art.Genre || '').toString().trim().toLowerCase();
                 const loc1 = (art.location || art.Location || '').toString().trim().toLowerCase();
                 const loc2 = (art.location2 || art['Location 2'] || art.location2 || '').toString().trim().toLowerCase();
-                const collectiveRaw = (art.collective || art.Collective || '').toString().trim();
-                const collective = collectiveRaw.toLowerCase();
-                const collectiveParts = collectiveRaw.split(/[;,]+/).map(s => s.trim().toLowerCase()).filter(Boolean);
+                    // Support both singular 'collective' field and normalized 'collectives' array
+                    const collectiveRaw = (art.collective || art.Collective || '').toString().trim();
+                    const collective = collectiveRaw.toLowerCase();
+                    const collectiveParts = (collectiveRaw ? collectiveRaw.split(/[;,]+/).map(s => s.trim().toLowerCase()).filter(Boolean) : []);
+                    const collectiveArray = Array.isArray(art.collectives) ? art.collectives.map(s => String(s).trim().toLowerCase()).filter(Boolean) : [];
                 const labelLow = label.toString().trim().toLowerCase();
                 if (type === 'genre') return genre === labelLow;
-                if (type === 'collective') return collective === labelLow || collectiveParts.includes(labelLow);
-                return loc1 === labelLow || loc2 === labelLow;
+                    if (type === 'collective') return collective === labelLow || collectiveParts.includes(labelLow) || collectiveArray.includes(labelLow);
+                    return loc1 === labelLow || loc2 === labelLow;
             });
         }
 
@@ -1942,29 +2425,58 @@ class MusicNetwork {
     }
     
     showArtistModal(artist) {
+        // Save current view state before opening modal to restore later
+        this._savedViewState = {
+            scale: this.scale,
+            offsetX: this.offsetX,
+            offsetY: this.offsetY
+        };
+
+        this._modalOpen = true;
+        
         // Handle flexible field names from CSV
         const artistName = artist.artistName || artist['Artist Name'] || 'unknown artist';
         const firstName = artist.firstName || artist['First Name'] || '';
         const genre = artist.genre || artist.Genre || 'not specified';
-        const location1 = artist.location || artist.Location || artist['Location '] || 'not specified';
-        const location2 = artist.location2 || artist['Location 2'] || artist['Location2'] || 'not specified';
+        // Support multiple locations
+        const locations = (artist.locations && artist.locations.length > 0)
+            ? artist.locations
+            : [ (artist.location || artist.Location || artist['Location '] || '') ].filter(Boolean);
+        const location1 = locations[0] || 'not specified';
+        const location2 = locations[1] || '';
         const url = artist.url || artist.URL || '';
-        const infoText = artist.infoText || artist['Info Text'] || 'no additional information available';
+    const infoText = artist.infoText || artist['Info Text'] || 'no additional information available';
+        const subgenre = artist.subgenre || artist.Subgenre || '';
+        const names = artist.names || [];
         // Inject full artist view into modal content (replaces group list if present)
         const modalContent = document.getElementById('modal-content');
         if (!modalContent) return;
 
-        // Combine locations into single display
-        let locationDisplay = location1;
-        if (location2 && location2 !== 'not specified' && location2 !== location1) {
-            locationDisplay += `, ${location2}`;
+        // Combine locations into single display (show all locations)
+        const locationDisplay = locations.length > 0 ? locations.join(', ') : 'not specified';
+
+        // Name field: prefer names provided in Name(s) column. If none provided, fall back to artistName.
+        const nameDisplay = (names && names.length > 0) ? names.join(', ') : (artistName || firstName || 'unknown artist');
+
+        // Genre display: include subgenre if present
+        const genreDisplay = subgenre ? `${genre}${genre ? ' — ' : ''}${subgenre}` : genre;
+
+        // Location label: pluralize if multiple
+        const locationLabel = (locations && locations.length > 1) ? 'locations' : 'location';
+
+        // Collective links (if any)
+        let collectiveHTML = '';
+    const collectiveArray = (artist.collectives && artist.collectives.length > 0) ? artist.collectives : ((artist.collective && artist.collective.length>0) ? artist.collective.split(/[;,]+/).map(s=>s.trim()).filter(Boolean) : []);
+    const contactFor = artist.contactFor || artist['Contact me for...'] || artist['contact me for...'] || '';
+        if (collectiveArray.length > 0) {
+            collectiveHTML = collectiveArray.map((c, idx) => `<a href="#" class="artist-collective-link" data-collective="${c}">${c}</a>`).join(', ');
         }
 
         modalContent.innerHTML = `
             <div id="artist-info">
                 <div class="info-row">
                     <span class="label">name:</span>
-                    <span id="artist-name">${firstName ? `${firstName} (${artistName})` : artistName}</span>
+                    <span id="artist-name">${nameDisplay}</span>
                 </div>
                 <div class="info-row">
                     <span class="label">url:</span>
@@ -1976,18 +2488,34 @@ class MusicNetwork {
                 </div>
                 <div class="info-row">
                     <span class="label">genre:</span>
-                    <span id="artist-genre">${genre}</span>
+                    <span id="artist-genre">${genreDisplay}</span>
                 </div>
                 <div class="info-row">
-                    <span class="label">location:</span>
+                    <span class="label">${locationLabel}:</span>
                     <span id="artist-location">${locationDisplay}</span>
                 </div>
-                <div class="info-row">
-                    <span class="label">collective:</span>
-                    <span id="artist-collective">${artist.collective || artist.Collective || 'none'}</span>
-                </div>
+                ${collectiveHTML ? `<div class="info-row"><span class="label">collective:</span><span id="artist-collective">${collectiveHTML}</span></div>` : ''}
+                ${contactFor ? `<div class="info-row"><span class="label">Contact me for:</span><span id="artist-contact">${contactFor}</span></div>` : ''}
             </div>
         `;
+
+        // Attach click handlers for collective links so they open the respective modal
+        if (collectiveHTML) {
+            const links = modalContent.querySelectorAll('.artist-collective-link');
+            links.forEach((ln) => {
+                ln.addEventListener('click', (ev) => {
+                    ev.preventDefault();
+                    const cname = ln.dataset.collective;
+                    if (!cname) return;
+                    // find the collective node with matching label
+                    const collectiveNode = this.nodes.find(n => n.type === 'collective' && n.label === cname);
+                    if (collectiveNode) {
+                        this.showGroupModal(collectiveNode);
+                    } else {
+                    }
+                });
+            });
+        }
 
         const titleEl = document.getElementById('modal-title');
         if (titleEl) titleEl.textContent = artistName;
@@ -1999,6 +2527,15 @@ class MusicNetwork {
     }
     
     showAboutModal() {
+        // Save current view state before opening modal to restore later
+        this._savedViewState = {
+            scale: this.scale,
+            offsetX: this.offsetX,
+            offsetY: this.offsetY
+        };
+
+        this._modalOpen = true;
+        
         const modalContent = document.getElementById('modal-content');
         if (!modalContent) return;
 
@@ -2060,6 +2597,18 @@ class MusicNetwork {
         // remove about-modal class for next modal
         const modal = document.getElementById('modal');
         if (modal) modal.classList.remove('about-modal');
+
+        this._modalOpen = false;
+        
+        // Restore saved view state (scale and offsets) to prevent layout drift
+        if (this._savedViewState) {
+            this.scale = this._savedViewState.scale;
+            this.offsetX = this._savedViewState.offsetX;
+            this.offsetY = this._savedViewState.offsetY;
+            this._savedViewState = null;
+            // Re-render with restored view
+            this.render();
+        }
     }
 }
 
