@@ -714,10 +714,8 @@ class MusicNetwork {
     
     async loadData() {
         try {
-            // Convert Google Sheets URL to CSV export format
-            // New database sheet (user-provided)
-            const sheetId = '1ICmPFunrRBS-2Y8p40f8N13y9DKDzf2pl1Cat-BABP4';
-            const csvUrl = `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv&gid=0`;
+            // Use the published CSV link so the data is openly accessible
+            const csvUrl = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQTnwSG0xCM-RCKMrCVOog0FroRmpW4hha12qS7OOI0qbNuLz0axm_DMJiHHtUf1NhW7lOpqb79y0tp/pub?output=csv';
             
             const response = await fetch(csvUrl, {
                 mode: 'cors',
