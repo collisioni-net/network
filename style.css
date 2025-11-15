@@ -439,7 +439,7 @@ body.list-view-active #list-empty {
     width: 100vw;
     height: 100vh;
     background: rgba(0, 0, 0, 0.9);
-    z-index: 1000;
+    z-index: 100000;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -783,6 +783,10 @@ body.modal-open #controls {
     z-index: 1900; /* position controls just beneath the modal overlay */
 }
 
+body.modal-open header {
+    display: none;
+}
+
 /* Make overlay highest z-index to cover everything */
 #modal-overlay {
     z-index: 2000;
@@ -914,6 +918,25 @@ body.modal-open #controls {
 
     #bottom-info {
         display: none;
+    }
+
+    #modal-overlay {
+        padding: 0;
+        align-items: stretch;
+        justify-content: stretch;
+    }
+
+    #modal {
+        width: 100%;
+        height: 100vh;
+        max-height: 100vh;
+        border-radius: 0;
+        margin: 0;
+    }
+
+    #modal-content {
+        flex: 1;
+        overflow-y: auto;
     }
 
     #controls {
