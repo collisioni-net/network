@@ -123,7 +123,7 @@ class MusicNetwork {
     this.desktopLayoutMultiplier = 3;
     // Mobile layout multiplier controls how much extra space the force layout can
     // occupy on smaller devices, giving more room for nodes to spread before final scaling.
-    this.mobileLayoutMultiplier = 1.6;
+    this.mobileLayoutMultiplier = 1.8;
     // Base scale the camera uses when centering on mobile before any dynamic fit adjustments.
     this.mobileDefaultCenterScale = 1.6;
 
@@ -274,10 +274,10 @@ class MusicNetwork {
         let attractionBase = this.tuning.attraction;
         const gravityBase = isMobile ? this.tuning.gravity * 0.5 : this.tuning.gravity;
         const baseMinDist = this.tuning.minDistance;
-    const minDist = isMobile ? Math.max(55, Math.round(baseMinDist * 1.5)) : baseMinDist;
+    const minDist = isMobile ? Math.max(55, Math.round(baseMinDist * 1.2)) : baseMinDist;
 
         if (isMobile) {
-            repulsionFactor *= 1.6;
+            repulsionFactor *= 1.8;
             attractionBase *= 0.8;
         }
 
@@ -1713,7 +1713,7 @@ class MusicNetwork {
             const scaleX = finalAvailableWidth / graphWidth;
             const scaleY = finalAvailableHeight / graphHeight;
             scale = Math.min(scaleX, scaleY, 1.2); // cap max scale at 1.2 to avoid over-zooming small graphs
-            scale = Math.max(scale, 0.3); // ensure minimum scale so graph doesn't get too tiny
+            scale = Math.max(scale, 0.6); // ensure minimum scale so graph doesn't get too tiny
         }
 
         // Determine multiplier: mobile uses the large initialZoomMultiplier, desktop uses a stronger desktopInitialZoomMultiplier
